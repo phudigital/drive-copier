@@ -100,6 +100,63 @@ function countFiles(folder) {
 }
 
 // =====================================================================
+//  DRIVE SPACE CHECK
+// =====================================================================
+
+/** Trả về { free, total, used } tính bằng bytes */
+function getDriveSpace() {
+  const about = Drive.About.get({ fields: 'storageQuota' });
+  const quota = about.storageQuota;
+  const total = parseInt(quota.limit || '0');
+  const used  = parseInt(quota.usage || '0');
+  const free  = total > 0 ? total - used : -1; // -1 = unlimited (Workspace unlimited)
+  return { free: free, total: total, used: used };
+}
+
+/** Ước tính tổng size (bytes) của folder — Google Docs/Sheets/Slides = 0 (không tính quota) */
+function estimateFolderSize(folder) {
+  let size = 0;
+  const files = folder.getFiles();
+  while (files.hasNext()) size += files.next().getSize();
+  const subs = folder.getFolders();
+  while (subs.hasNext()) size += estimateFolderSize(subs.next());
+  return size;
+}
+
+/** Kiểm tra dung lượng trước khi copy.
+ *  Trả về { free, total, used, estimated, enough, unlimited }
+ */
+function checkSpace(sourceUrl) {
+  const parsed = parseId(sourceUrl);
+  if (!parsed) throw new Error('Không nhận ra định dạng link/ID.');
+
+  let type = parsed.type;
+  if (type === 'unknown') type = detectType(parsed.id);
+  if (!type) throw new Error('Không thể truy cập file/folder. Kiểm tra quyền chia sẻ.');
+
+  const space = getDriveSpace();
+  let estimated = 0;
+  if (type === 'folder') {
+    estimated = estimateFolderSize(DriveApp.getFolderById(parsed.id));
+  } else {
+    estimated = DriveApp.getFileById(parsed.id).getSize();
+  }
+
+  const unlimited = space.free === -1;
+  const enough    = unlimited || space.free >= estimated;
+
+  return {
+    free:      space.free,
+    total:     space.total,
+    used:      space.used,
+    estimated: estimated,
+    enough:    enough,
+    unlimited: unlimited
+  };
+}
+
+
+// =====================================================================
 //  MAIN COPY  — overwriteMode: 'skip' | 'overwrite' | 'rename'
 // =====================================================================
 

@@ -683,6 +683,85 @@
             margin-top: 2px;
         }
 
+
+        /* --- Space check --- */
+        .space-check-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .btn-check-space {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            color: var(--muted);
+            padding: 8px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            font-family: var(--sans);
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+
+        .btn-check-space:hover {
+            border-color: var(--accent2);
+            color: var(--accent2);
+        }
+
+        .btn-check-space:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .space-result {
+            flex: 1;
+            font-size: 12px;
+            display: none;
+            padding: 7px 10px;
+            border-radius: 7px;
+            line-height: 1.5;
+        }
+
+        .space-result.show {
+            display: block;
+        }
+
+        .space-result.ok {
+            background: var(--accent-dim);
+            border: 1px solid rgba(74, 222, 128, 0.3);
+            color: var(--accent);
+        }
+
+        .space-result.warn {
+            background: rgba(251, 191, 36, 0.08);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+            color: var(--warn);
+        }
+
+        .space-bar-wrap {
+            margin-top: 6px;
+        }
+
+        .space-bar-bg {
+            width: 100%;
+            height: 4px;
+            background: var(--surface2);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+
+        .space-bar-used {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.4s;
+        }
+
         ::-webkit-scrollbar {
             width: 4px;
         }
@@ -723,6 +802,15 @@
                 <label>Link hoặc ID file / folder được chia sẻ</label>
                 <input id="sourceUrl" type="text" placeholder="https://drive.google.com/drive/folders/... hoặc ID thuần"
                     style="margin-bottom:0">
+            </div>
+
+
+            <!-- Space check -->
+            <div class="space-check-row">
+                <button class="btn-check-space" id="spaceBtn" onclick="runSpaceCheck()">
+                    🗄 Kiểm tra dung lượng
+                </button>
+                <div class="space-result" id="spaceResult"></div>
             </div>
 
             <!-- Overwrite mode -->
@@ -1059,6 +1147,79 @@
         // ── Utils ──
         function escHtml(s) {
             return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+
+        // ── Space check ──
+        function runSpaceCheck() {
+            const url = document.getElementById('sourceUrl').value.trim();
+            if (!url) {
+                showSpaceResult('warn', '⚠ Nhập link nguồn trước.');
+                return;
+            }
+            const btn = document.getElementById('spaceBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spin"></span> Đang kiểm tra...';
+            showSpaceResult('', '');
+
+            google.script.run
+                .withSuccessHandler(r => {
+                    btn.disabled = false;
+                    btn.innerHTML = '🗄 Kiểm tra dung lượng';
+
+                    const fmt = b => {
+                        if (b < 0) return '∞';
+                        if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+                        if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+                        if (b >= 1024) return (b / 1024).toFixed(0) + ' KB';
+                        return b + ' B';
+                    };
+
+                    const estTxt = fmt(r.estimated);
+                    const freeTxt = r.unlimited ? '∞ (Unlimited)' : fmt(r.free);
+                    const usedPct = r.total > 0 ? Math.round((r.used / r.total) * 100) : 0;
+                    const afterPct = r.total > 0 ? Math.min(100, Math.round(((r.used + r.estimated) / r.total) * 100)) : 0;
+
+                    const barColor = afterPct > 90 ? 'var(--danger)' : afterPct > 70 ? 'var(--warn)' : 'var(--accent)';
+
+                    const barHtml = r.unlimited ? '' : `
+        <div class="space-bar-wrap">
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px;">
+            <span>Đã dùng: ${fmt(r.used)} (${usedPct}%)</span>
+            <span>Sau copy: ~${afterPct}%</span>
+          </div>
+          <div class="space-bar-bg">
+            <div class="space-bar-used" style="width:${afterPct}%;background:${barColor}"></div>
+          </div>
+        </div>`;
+
+                    if (r.enough) {
+                        showSpaceResult('ok',
+                            '✅ Đủ dung lượng &nbsp;—&nbsp; Ước tính cần: <strong>' + estTxt + '</strong>' +
+                            ' &nbsp;|&nbsp; Còn trống: <strong>' + freeTxt + '</strong>' + barHtml
+                        );
+                    } else {
+                        const lack = fmt(r.estimated - r.free);
+                        showSpaceResult('warn',
+                            '⚠ Không đủ dung lượng! Cần thêm <strong>' + lack + '</strong>.' +
+                            ' &nbsp;Ước tính: <strong>' + estTxt + '</strong>' +
+                            ' &nbsp;|&nbsp; Còn trống: <strong>' + freeTxt + '</strong>' + barHtml
+                        );
+                    }
+                })
+                .withFailureHandler(e => {
+                    btn.disabled = false;
+                    btn.innerHTML = '🗄 Kiểm tra dung lượng';
+                    showSpaceResult('warn', '❌ ' + e.message);
+                })
+                .checkSpace(url);
+        }
+
+        function showSpaceResult(type, msg) {
+            const el = document.getElementById('spaceResult');
+            if (!type) { el.className = 'space-result'; el.innerHTML = ''; return; }
+            el.className = 'space-result show ' + type;
+            el.innerHTML = msg;
         }
 
         // ── Init ──
