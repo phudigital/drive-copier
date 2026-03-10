@@ -1,5 +1,7 @@
 # 📂 Drive Copier
 
+![Drive Copier Thumbnail](https://raw.githubusercontent.com/phudigital/drive-copier/main/thumbnail.png)
+
 > Copy file & folder từ Google Drive được chia sẻ về Drive cá nhân — nhanh, trực quan, không cần cài đặt.
 
 ---
