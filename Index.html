@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drive Copier</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0d0f14;
+            --surface: #161a23;
+            --surface2: #1e2330;
+            --border: #2a3040;
+            --accent: #4ade80;
+            --accent2: #22d3ee;
+            --accent-dim: rgba(74, 222, 128, 0.12);
+            --text: #e8eaf0;
+            --muted: #6b7585;
+            --danger: #f87171;
+            --warn: #fbbf24;
+            --mono: 'Space Mono', monospace;
+            --sans: 'DM Sans', sans-serif;
+            --radius: 10px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            min-height: 100vh;
+            padding: 24px 16px 60px;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.035'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .wrap {
+            max-width: 640px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header */
+        header {
+            margin-bottom: 32px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 4px;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: var(--accent-dim);
+            border: 1.5px solid var(--accent);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+
+        .logo-text {
+            font-family: var(--mono);
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .logo-sub {
+            font-size: 12px;
+            color: var(--muted);
+            font-family: var(--mono);
+            margin-left: 46px;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 4px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 9px;
+            background: transparent;
+            border: none;
+            border-radius: 7px;
+            color: var(--muted);
+            font-family: var(--sans);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.18s;
+        }
+
+        .tab.active {
+            background: var(--surface2);
+            color: var(--accent);
+            border: 1px solid var(--border);
+        }
+
+        .tab:hover:not(.active) {
+            color: var(--text);
+        }
+
+        .panel {
+            display: none;
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        /* Card */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 18px;
+            margin-bottom: 14px;
+        }
+
+        .card-title {
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            margin-bottom: 12px;
+        }
+
+        /* Form */
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--muted);
+            margin-bottom: 5px;
+        }
+
+        input[type=text] {
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 14px;
+            padding: 10px 12px;
+            outline: none;
+            transition: border-color 0.15s;
+            margin-bottom: 12px;
+        }
+
+        input[type=text]:focus {
+            border-color: var(--accent2);
+        }
+
+        input[type=text]::placeholder {
+            color: var(--muted);
+        }
+
+        /* Overwrite mode radio */
+        .mode-group {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 0;
+            flex-wrap: wrap;
+        }
+
+        .mode-opt {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.15s;
+            flex: 1;
+        }
+
+        .mode-opt input[type=radio] {
+            display: none;
+        }
+
+        .mode-opt.selected-rename {
+            border-color: var(--accent2);
+            color: var(--accent2);
+        }
+
+        .mode-opt.selected-overwrite {
+            border-color: var(--warn);
+            color: var(--warn);
+        }
+
+        .mode-opt.selected-skip {
+            border-color: var(--muted);
+            color: var(--text);
+        }
+
+        .mode-opt:hover {
+            border-color: var(--text);
+        }
+
+        .mode-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            border: 2px solid currentColor;
+            flex-shrink: 0;
+            transition: all 0.15s;
+        }
+
+        .mode-opt.selected-rename .mode-dot,
+        .mode-opt.selected-overwrite .mode-dot,
+        .mode-opt.selected-skip .mode-dot {
+            background: currentColor;
+        }
+
+        /* Folder nav */
+        .folder-nav-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .folder-nav {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            padding: 7px 10px;
+            font-size: 12px;
+            color: var(--muted);
+            min-height: 36px;
+            flex: 1;
+        }
+
+        .crumb {
+            cursor: pointer;
+            color: var(--accent2);
+            font-weight: 500;
+            transition: opacity 0.15s;
+        }
+
+        .crumb:hover {
+            opacity: 0.75;
+        }
+
+        .crumb-sep {
+            color: var(--border);
+        }
+
+        /* New folder inline button */
+        .btn-new-folder {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            color: var(--muted);
+            padding: 7px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-family: var(--sans);
+            transition: all 0.15s;
+            flex-shrink: 0;
+        }
+
+        .btn-new-folder:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* New folder input row */
+        .new-folder-row {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .new-folder-row.show {
+            display: flex;
+        }
+
+        .new-folder-row input {
+            flex: 1;
+            margin-bottom: 0 !important;
+            background: var(--bg);
+            border: 1px solid var(--accent);
+            border-radius: 7px;
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 13px;
+            padding: 8px 10px;
+            outline: none;
+        }
+
+        .btn-confirm-folder {
+            background: var(--accent);
+            color: #0a0f0a;
+            border: none;
+            border-radius: 7px;
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: var(--sans);
+            transition: background 0.15s;
+        }
+
+        .btn-confirm-folder:hover {
+            background: #6ee79a;
+        }
+
+        .btn-cancel-folder {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 7px;
+            padding: 8px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            font-family: var(--sans);
+        }
+
+        .folder-list {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-bottom: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .folder-item {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.15s;
+            overflow: hidden;
+        }
+
+        .folder-item span {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .folder-item:hover {
+            border-color: var(--accent2);
+            color: var(--accent2);
+        }
+
+        .folder-item.selected {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            color: var(--accent);
+        }
+
+        .folder-empty {
+            font-size: 12px;
+            color: var(--muted);
+            font-style: italic;
+            margin-bottom: 12px;
+            grid-column: 1/-1;
+        }
+
+        .dest-label {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 4px;
+        }
+
+        .dest-label span {
+            color: var(--accent2);
+        }
+
+        /* Buttons */
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: var(--radius);
+            font-family: var(--sans);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.18s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #0a0f0a;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #6ee79a;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(74, 222, 128, 0.3);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-danger {
+            background: transparent;
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            font-size: 12px;
+            padding: 8px;
+            width: auto;
+            margin-top: 14px;
+        }
+
+        .btn-danger:hover {
+            background: rgba(248, 113, 113, 0.1);
+        }
+
+        /* Progress */
+        .progress-wrap {
+            display: none;
+            margin-top: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px;
+        }
+
+        .progress-wrap.show {
+            display: block;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .progress-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .progress-pct {
+            font-family: var(--mono);
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 6px;
+            background: var(--surface2);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            border-radius: 3px;
+            transition: width 0.4s ease;
+            width: 0%;
+        }
+
+        .progress-current {
+            font-size: 11px;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .progress-counts {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 3px;
+        }
+
+        /* Error log */
+        .error-log {
+            display: none;
+            margin-top: 10px;
+            background: rgba(248, 113, 113, 0.06);
+            border: 1px solid rgba(248, 113, 113, 0.25);
+            border-radius: 7px;
+            padding: 10px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .error-log.show {
+            display: block;
+        }
+
+        .error-log-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--danger);
+            margin-bottom: 6px;
+        }
+
+        .error-log-item {
+            font-size: 11px;
+            color: var(--danger);
+            margin-bottom: 3px;
+        }
+
+        /* Status */
+        .status {
+            display: none;
+            padding: 12px 14px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            margin-top: 10px;
+            line-height: 1.5;
+        }
+
+        .status.show {
+            display: block;
+        }
+
+        .status.success {
+            background: var(--accent-dim);
+            border: 1px solid rgba(74, 222, 128, 0.3);
+            color: var(--accent);
+        }
+
+        .status.error {
+            background: rgba(248, 113, 113, 0.08);
+            border: 1px solid rgba(248, 113, 113, 0.3);
+            color: var(--danger);
+        }
+
+        /* Spinner */
+        .spin {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(34, 211, 238, 0.3);
+            border-top-color: var(--accent2);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* History */
+        .history-empty {
+            text-align: center;
+            padding: 40px 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .history-item {
+            display: flex;
+            gap: 12px;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .hist-icon {
+            width: 34px;
+            height: 34px;
+            flex-shrink: 0;
+            background: var(--surface2);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .hist-body {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .hist-name {
+            font-weight: 600;
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 3px;
+        }
+
+        .hist-meta {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .hist-badge {
+            font-family: var(--mono);
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            flex-shrink: 0;
+            align-self: flex-start;
+            margin-top: 2px;
+        }
+
+        .hist-badge.folder {
+            border-color: rgba(74, 222, 128, 0.4);
+            color: var(--accent);
+        }
+
+        .hist-badge.file {
+            border-color: rgba(34, 211, 238, 0.4);
+            color: var(--accent2);
+        }
+
+        .hist-err {
+            font-size: 10px;
+            color: var(--danger);
+            margin-top: 2px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+
+        <header>
+            <div class="logo">
+                <div class="logo-icon">📂</div>
+                <div class="logo-text">drive_copier</div>
+            </div>
+            <div class="logo-sub">copy shared files &amp; folders to your drive</div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('copy')">⬇ Copy</button>
+            <button class="tab" onclick="switchTab('history')">🕒 Lịch sử</button>
+        </div>
+
+        <!-- ===== COPY PANEL ===== -->
+        <div id="panel-copy" class="panel active">
+
+            <!-- Source -->
+            <div class="card">
+                <div class="card-title">Nguồn</div>
+                <label>Link hoặc ID file / folder được chia sẻ</label>
+                <input id="sourceUrl" type="text" placeholder="https://drive.google.com/drive/folders/... hoặc ID thuần"
+                    style="margin-bottom:0">
+            </div>
+
+            <!-- Overwrite mode -->
+            <div class="card">
+                <div class="card-title">Khi trùng tên file</div>
+                <div class="mode-group">
+                    <label class="mode-opt selected-rename" onclick="selectMode('rename', this)">
+                        <input type="radio" name="overwrite" value="rename" checked>
+                        <span class="mode-dot"></span> Đổi tên (an toàn)
+                    </label>
+                    <label class="mode-opt" onclick="selectMode('overwrite', this)">
+                        <input type="radio" name="overwrite" value="overwrite">
+                        <span class="mode-dot"></span> Ghi đè
+                    </label>
+                    <label class="mode-opt" onclick="selectMode('skip', this)">
+                        <input type="radio" name="overwrite" value="skip">
+                        <span class="mode-dot"></span> Bỏ qua
+                    </label>
+                </div>
+            </div>
+
+            <!-- Destination -->
+            <div class="card">
+                <div class="card-title">Thư mục đích</div>
+
+                <div class="folder-nav-row">
+                    <div class="folder-nav" id="folderNav">
+                        <span class="crumb" onclick="navTo('root','My Drive')">My Drive</span>
+                    </div>
+                    <button class="btn-new-folder" onclick="showNewFolder()">＋ Tạo thư mục</button>
+                </div>
+
+                <!-- New folder input -->
+                <div class="new-folder-row" id="newFolderRow">
+                    <input type="text" id="newFolderName" placeholder="Tên thư mục mới..."
+                        onkeydown="if(event.key==='Enter')confirmNewFolder()">
+                    <button class="btn-confirm-folder" onclick="confirmNewFolder()">Tạo</button>
+                    <button class="btn-cancel-folder" onclick="hideNewFolder()">✕</button>
+                </div>
+
+                <div id="folderList" class="folder-list">
+                    <div style="font-size:12px;color:var(--muted);grid-column:1/-1">Đang tải...</div>
+                </div>
+
+                <input type="hidden" id="destFolderId" value="root">
+                <div class="dest-label">📍 Đang chọn: <span id="destLabel">My Drive (root)</span></div>
+            </div>
+
+            <!-- Copy button -->
+            <button class="btn btn-primary" id="copyBtn" onclick="startCopy()">⬇ Bắt đầu Copy</button>
+
+            <!-- Progress -->
+            <div class="progress-wrap" id="progressWrap">
+                <div class="progress-header">
+                    <div class="progress-title" id="progressTitle">Đang copy...</div>
+                    <div class="progress-pct" id="progressPct">0%</div>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressBar"></div>
+                </div>
+                <div class="progress-current" id="progressCurrent">Đang chuẩn bị...</div>
+                <div class="progress-counts" id="progressCounts"></div>
+
+                <div class="error-log" id="errorLog">
+                    <div class="error-log-title">⚠ Các file bị lỗi:</div>
+                    <div id="errorLogItems"></div>
+                </div>
+            </div>
+
+            <!-- Final status -->
+            <div class="status" id="status"></div>
+
+        </div>
+
+        <!-- ===== HISTORY PANEL ===== -->
+        <div id="panel-history" class="panel">
+            <div class="card">
+                <div class="card-title">Lịch sử copy (tối đa 50)</div>
+                <div id="historyList"></div>
+            </div>
+            <button class="btn btn-danger" onclick="clearHist()">🗑 Xoá lịch sử</button>
+        </div>
+
+    </div>
+
+    <script>
+        // ── State ──
+        let breadcrumb = [{ id: 'root', name: 'My Drive' }];
+        let pollTimer = null;
+        let copyRunning = false;
+
+        // ── Tabs ──
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach((t, i) =>
+                t.classList.toggle('active', ['copy', 'history'][i] === tab));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.getElementById('panel-' + tab).classList.add('active');
+            if (tab === 'history') loadHistory();
+        }
+
+        // ── Overwrite mode ──
+        function selectMode(mode, el) {
+            document.querySelectorAll('.mode-opt').forEach(o =>
+                o.className = 'mode-opt');
+            el.classList.add('selected-' + mode);
+            el.querySelector('input').checked = true;
+        }
+
+        function getMode() {
+            return document.querySelector('input[name="overwrite"]:checked').value;
+        }
+
+        // ── Folder navigation ──
+        function loadFolders(parentId) {
+            const list = document.getElementById('folderList');
+            list.innerHTML = '<div style="font-size:12px;color:var(--muted);grid-column:1/-1">Đang tải...</div>';
+            google.script.run
+                .withSuccessHandler(f => renderFolders(f))
+                .withFailureHandler(e => {
+                    list.innerHTML = '<div style="font-size:12px;color:var(--danger);grid-column:1/-1">Lỗi: ' + e.message + '</div>';
+                })
+                .getFolders(parentId);
+        }
+
+        function renderFolders(folders) {
+            const list = document.getElementById('folderList');
+            list.innerHTML = '';
+            if (!folders.length) {
+                list.innerHTML = '<div class="folder-empty">— Không có thư mục con —</div>';
+                return;
+            }
+            folders.forEach(f => {
+                const el = document.createElement('div');
+                el.className = 'folder-item';
+                el.innerHTML = '📁 <span title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</span>';
+                el.ondblclick = () => navInto(f.id, f.name);
+                el.onclick = () => selectFolder(f.id, f.name, el);
+                list.appendChild(el);
+            });
+        }
+
+        function selectFolder(id, name, el) {
+            document.querySelectorAll('.folder-item').forEach(i => i.classList.remove('selected'));
+            el.classList.add('selected');
+            document.getElementById('destFolderId').value = id;
+            document.getElementById('destLabel').textContent = name;
+        }
+
+        function navInto(id, name) {
+            breadcrumb.push({ id, name });
+            renderBreadcrumb();
+            document.getElementById('destFolderId').value = id;
+            document.getElementById('destLabel').textContent = name;
+            loadFolders(id);
+        }
+
+        function navTo(id, name) {
+            const idx = breadcrumb.findIndex(b => b.id === id);
+            if (idx >= 0) breadcrumb = breadcrumb.slice(0, idx + 1);
+            renderBreadcrumb();
+            document.getElementById('destFolderId').value = id;
+            document.getElementById('destLabel').textContent = name + (id === 'root' ? ' (root)' : '');
+            loadFolders(id);
+        }
+
+        function renderBreadcrumb() {
+            const nav = document.getElementById('folderNav');
+            nav.innerHTML = '';
+            breadcrumb.forEach((b, i) => {
+                const crumb = document.createElement('span');
+                crumb.className = 'crumb';
+                crumb.textContent = b.name;
+                crumb.onclick = () => navTo(b.id, b.name);
+                nav.appendChild(crumb);
+                if (i < breadcrumb.length - 1) {
+                    const sep = document.createElement('span');
+                    sep.className = 'crumb-sep';
+                    sep.textContent = ' / ';
+                    nav.appendChild(sep);
+                }
+            });
+        }
+
+        // ── New folder ──
+        function showNewFolder() {
+            const row = document.getElementById('newFolderRow');
+            row.classList.add('show');
+            document.getElementById('newFolderName').value = '';
+            document.getElementById('newFolderName').focus();
+        }
+
+        function hideNewFolder() {
+            document.getElementById('newFolderRow').classList.remove('show');
+        }
+
+        function confirmNewFolder() {
+            const name = document.getElementById('newFolderName').value.trim();
+            if (!name) return;
+            const parentId = document.getElementById('destFolderId').value;
+
+            google.script.run
+                .withSuccessHandler(f => {
+                    hideNewFolder();
+                    // Navigate into newly created folder
+                    navInto(f.id, f.name);
+                })
+                .withFailureHandler(e => alert('Lỗi: ' + e.message))
+                .createFolder(parentId, name);
+        }
+
+        // ── Copy ──
+        function startCopy() {
+            const url = document.getElementById('sourceUrl').value.trim();
+            const dest = document.getElementById('destFolderId').value;
+            const mode = getMode();
+            if (!url) { showFinalStatus('Vui lòng nhập link hoặc ID nguồn.', 'error'); return; }
+            if (copyRunning) return;
+
+            copyRunning = true;
+            document.getElementById('copyBtn').disabled = true;
+            document.getElementById('copyBtn').innerHTML = '<span class="spin"></span> Đang copy...';
+            document.getElementById('status').className = 'status';
+
+            // Show progress block
+            showProgress(0, 1, 'Đang khởi động...', '', []);
+
+            // Start polling BEFORE calling copyItem
+            startPolling();
+
+            google.script.run
+                .withSuccessHandler(res => {
+                    stopPolling();
+                    copyRunning = false;
+                    document.getElementById('copyBtn').disabled = false;
+                    document.getElementById('copyBtn').innerHTML = '⬇ Bắt đầu Copy';
+
+                    // Final progress fill
+                    showProgress(res.files, res.files || 1, 'Hoàn thành ✅', res.files + ' file đã copy', res.errors || []);
+                    document.getElementById('progressTitle').textContent = 'Hoàn thành';
+                    document.getElementById('progressBar').style.background = 'var(--accent)';
+
+                    const errCount = (res.errors || []).length;
+                    showFinalStatus(
+                        '✅ <strong>' + escHtml(res.name) + '</strong> — ' +
+                        res.files + ' file, ' + res.folders + ' folder đã copy.' +
+                        (errCount ? ' <span style="color:var(--warn)">⚠ ' + errCount + ' lỗi (xem bên trên)</span>' : ''),
+                        'success'
+                    );
+                })
+                .withFailureHandler(e => {
+                    stopPolling();
+                    copyRunning = false;
+                    document.getElementById('copyBtn').disabled = false;
+                    document.getElementById('copyBtn').innerHTML = '⬇ Bắt đầu Copy';
+                    document.getElementById('progressWrap').classList.remove('show');
+                    showFinalStatus('❌ Lỗi: ' + e.message, 'error');
+                })
+                .copyItem(url, dest, mode);
+        }
+
+        // ── Progress polling ──
+        function startPolling() {
+            pollTimer = setInterval(() => {
+                google.script.run
+                    .withSuccessHandler(p => {
+                        if (!p) return;
+                        showProgress(p.done, p.total, p.current, p.done + ' / ' + p.total + ' file', p.errors || []);
+                        if (p.status === 'done' || p.status === 'error') stopPolling();
+                    })
+                    .getProgress();
+            }, 1500);
+        }
+
+        function stopPolling() {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+
+        function showProgress(done, total, current, counts, errors) {
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            document.getElementById('progressWrap').classList.add('show');
+            document.getElementById('progressPct').textContent = pct + '%';
+            document.getElementById('progressBar').style.width = pct + '%';
+            document.getElementById('progressCurrent').textContent = '📄 ' + (current || '');
+            document.getElementById('progressCounts').textContent = counts || '';
+
+            if (errors && errors.length) {
+                document.getElementById('errorLog').classList.add('show');
+                document.getElementById('errorLogItems').innerHTML =
+                    errors.map(e => '<div class="error-log-item">' + escHtml(e) + '</div>').join('');
+            }
+        }
+
+        function showFinalStatus(msg, type) {
+            const el = document.getElementById('status');
+            el.className = 'status show ' + type;
+            el.innerHTML = msg;
+        }
+
+        // ── History ──
+        function loadHistory() {
+            const list = document.getElementById('historyList');
+            list.innerHTML = '<div style="font-size:12px;color:var(--muted);">Đang tải...</div>';
+            google.script.run
+                .withSuccessHandler(renderHistory)
+                .withFailureHandler(() => { list.textContent = 'Không thể tải lịch sử.'; })
+                .getHistory();
+        }
+
+        function renderHistory(history) {
+            const list = document.getElementById('historyList');
+            if (!history.length) {
+                list.innerHTML = '<div class="history-empty">Chưa có lịch sử copy nào.</div>';
+                return;
+            }
+            list.innerHTML = history.map(h => `
+    <div class="history-item">
+      <div class="hist-icon">${h.type === 'folder' ? '📁' : '📄'}</div>
+      <div class="hist-body">
+        <div class="hist-name">${escHtml(h.name)}</div>
+        <div class="hist-meta">→ ${escHtml(h.dest)} · ${h.date}</div>
+        <div class="hist-meta">${h.files} file, ${h.folders} folder</div>
+        ${h.errors ? '<div class="hist-err">⚠ ' + h.errors + ' lỗi</div>' : ''}
+      </div>
+      <div class="hist-badge ${h.type}">${h.type}</div>
+    </div>
+  `).join('');
+        }
+
+        function clearHist() {
+            if (!confirm('Xoá toàn bộ lịch sử?')) return;
+            google.script.run.withSuccessHandler(() => loadHistory()).clearHistory();
+        }
+
+        // ── Utils ──
+        function escHtml(s) {
+            return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // ── Init ──
+        loadFolders('root');
+    </script>
+</body>
+
+</html>
