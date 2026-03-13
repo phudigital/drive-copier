@@ -1,7 +1,10 @@
 // ============================================================
-//  DRIVE COPIER - Code.gs  (v2 — progress + overwrite + mkdir)
+//  DRIVE COPIER - Code.gs  (v3.5 — 2025-03-13)
+//  Email + storage header · Drive info · folder sizes
 // ============================================================
 
+const APP_VERSION  = '3.5';
+const APP_UPDATED  = '2025-03-13';
 const HISTORY_KEY  = 'copy_history';
 const PROGRESS_KEY = 'copy_progress';
 
@@ -10,6 +13,39 @@ function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('Drive Copier')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/** Trả về phiên bản, ngày cập nhật, email và dung lượng Drive */
+function getAppInfo() {
+  let email = '';
+  try { email = Session.getActiveUser().getEmail(); } catch(e) {}
+  let storage = null;
+  try { storage = getDriveSpace(); } catch(e) {}
+  return {
+    version: APP_VERSION,
+    updated: APP_UPDATED,
+    email: email,
+    storage: storage
+  };
+}
+
+/** Trả về thông tin chi tiết Drive cho tab Quản lý */
+function getDriveInfo() {
+  let email = '', displayName = '';
+  try {
+    email = Session.getActiveUser().getEmail();
+  } catch(e) {}
+  try {
+    const about = Drive.About.get({ fields: 'user' });
+    displayName = about.user.displayName || '';
+    if (!email) email = about.user.emailAddress || '';
+  } catch(e) {}
+  const storage = getDriveSpace();
+  return {
+    email: email,
+    displayName: displayName,
+    storage: storage
+  };
 }
 
 // =====================================================================
@@ -35,6 +71,46 @@ function getFolders(parentId) {
   return folders;
 }
 
+/**
+ * Trả về danh sách thư mục kèm dung lượng (file trực tiếp, không đệ quy)
+ * Dùng cho tab Quản lý. Có timeout protection 25s.
+ */
+function getFoldersManage(parentId) {
+  parentId = parentId || 'root';
+  const folders = getFolders(parentId);
+  const startTime = Date.now();
+
+  for (const folder of folders) {
+    // Timeout protection: nếu quá 25s thì dừng tính size
+    if (Date.now() - startTime > 25000) {
+      folder.fileCount = -1;
+      folder.size = -1;
+      continue;
+    }
+    try {
+      const childQuery = `'${folder.id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+      let totalSize = 0, fileCount = 0;
+      let pt = null;
+      do {
+        const r = Drive.Files.list({
+          q: childQuery,
+          fields: 'nextPageToken, files(size)',
+          pageSize: 1000,
+          pageToken: pt
+        });
+        (r.files || []).forEach(f => { fileCount++; totalSize += parseInt(f.size || '0'); });
+        pt = r.nextPageToken;
+      } while (pt);
+      folder.fileCount = fileCount;
+      folder.size = totalSize;
+    } catch(e) {
+      folder.fileCount = -1;
+      folder.size = -1;
+    }
+  }
+  return folders;
+}
+
 /** Tạo thư mục mới, trả về { id, name } */
 function createFolder(parentId, folderName) {
   folderName = (folderName || '').trim();
@@ -42,6 +118,53 @@ function createFolder(parentId, folderName) {
   const parent = parentId === 'root' ? DriveApp.getRootFolder() : DriveApp.getFolderById(parentId);
   const newFolder = parent.createFolder(folderName);
   return { id: newFolder.getId(), name: newFolder.getName() };
+}
+
+/** Đổi tên thư mục */
+function renameFolder(folderId, newName) {
+  newName = (newName || '').trim();
+  if (!newName) throw new Error('Tên thư mục không được để trống.');
+  if (folderId === 'root') throw new Error('Không thể đổi tên thư mục root.');
+  const folder = DriveApp.getFolderById(folderId);
+  folder.setName(newName);
+  return { id: folder.getId(), name: folder.getName() };
+}
+
+/** Xóa thư mục (chuyển vào thùng rác) */
+function deleteFolder(folderId) {
+  if (folderId === 'root') throw new Error('Không thể xóa thư mục root.');
+  const folder = DriveApp.getFolderById(folderId);
+  const name = folder.getName();
+  folder.setTrashed(true);
+  return { success: true, name: name };
+}
+
+/** Lấy thông tin chi tiết folder: số file + subfolder + tổng size */
+function getFolderInfo(folderId) {
+  if (folderId === 'root') {
+    return { name: 'My Drive', files: -1, folders: -1, size: -1 };
+  }
+  const folder = DriveApp.getFolderById(folderId);
+  const fileCount = countFiles(folder);
+  const folderCount = countFolders(folder);
+  const size = estimateFolderSize(folder);
+  return {
+    name: folder.getName(),
+    files: fileCount,
+    folders: folderCount,
+    size: size
+  };
+}
+
+/** Đếm tổng subfolder đệ quy */
+function countFolders(folder) {
+  let total = 0;
+  const subs = folder.getFolders();
+  while (subs.hasNext()) {
+    total++;
+    total += countFolders(subs.next());
+  }
+  return total;
 }
 
 // =====================================================================
@@ -71,6 +194,8 @@ function detectType(id) {
 // =====================================================================
 
 function setProgress(data) {
+  // Thêm timestamp để frontend phân biệt update mới vs cũ
+  data._ts = Date.now();
   PropertiesService.getUserProperties().setProperty(PROGRESS_KEY, JSON.stringify(data));
 }
 
@@ -162,6 +287,9 @@ function checkSpace(sourceUrl) {
 
 function copyItem(sourceUrl, destFolderId, overwriteMode) {
   overwriteMode = overwriteMode || 'rename';
+
+  // Xóa progress cũ trước khi bắt đầu
+  clearProgress();
 
   const parsed = parseId(sourceUrl);
   if (!parsed) throw new Error('Không nhận ra định dạng link/ID. Vui lòng kiểm tra lại.');
