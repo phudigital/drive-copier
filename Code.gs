@@ -574,7 +574,10 @@ function continueCopyByTrigger() {
 function getCopyStatus() {
   const progress = getProgress();
   const state = getCopyState();
-  const triggerCount = getCopyTriggerCount();
+  const copyTriggers = getProjectTriggerDetails().filter(function(trigger) {
+    return trigger.handler === COPY_TRIGGER_HANDLER;
+  });
+  const triggerCount = copyTriggers.length;
   const progressStatus = progress && progress.status ? progress.status : '';
   const stateStatus = state && state.status ? state.status : '';
   let status = progressStatus || stateStatus || (triggerCount ? 'scheduled' : 'idle');
@@ -594,6 +597,7 @@ function getCopyStatus() {
     hasTrigger: triggerCount > 0,
     triggerCount: triggerCount,
     triggerHandler: COPY_TRIGGER_HANDLER,
+    triggerIds: copyTriggers.map(function(trigger) { return trigger.id; }),
     source: state ? state.source : '',
     destName: state ? state.destName : '',
     name: (progress && progress.name) || (state && state.name) || '',
@@ -605,6 +609,34 @@ function getCopyStatus() {
     startedAt: state ? state.startedAt || null : null,
     updatedAt: (progress && progress._ts) || (state && state.updatedAt) || null,
     nextTriggerAt: state ? state.nextTriggerAt || null : null
+  };
+}
+
+function getTriggerDashboard() {
+  const triggers = getProjectTriggerDetails();
+  const copyStatus = getCopyStatus();
+  return {
+    checkedAt: Date.now(),
+    copyStatus: copyStatus,
+    triggers: triggers,
+    copyTriggers: triggers.filter(function(trigger) {
+      return trigger.handler === COPY_TRIGGER_HANDLER;
+    }),
+    limits: {
+      scriptRuntimeMin: 6,
+      simultaneousExecutionsPerUser: 30,
+      simultaneousExecutionsPerScript: 1000,
+      triggersPerUserPerScript: 20,
+      triggerRuntimeConsumerMinPerDay: 90,
+      triggerRuntimeWorkspaceHrPerDay: 6
+    },
+    appMode: {
+      appsScriptSupportsParallelExecutions: true,
+      parallelCopyEnabled: false,
+      stateKey: COPY_STATE_KEY,
+      progressKey: PROGRESS_KEY,
+      reason: 'Phiên copy hiện tại dùng một copy_state duy nhất để tránh hai lượt copy ghi đè trạng thái của nhau.'
+    }
   };
 }
 
@@ -720,6 +752,31 @@ function getCopyTriggerCount() {
     }
   });
   return count;
+}
+
+function getProjectTriggerDetails() {
+  const triggers = ScriptApp.getProjectTriggers();
+  return triggers.map(function(trigger) {
+    return {
+      id: safeTriggerValue(function() { return trigger.getUniqueId(); }),
+      handler: safeTriggerValue(function() { return trigger.getHandlerFunction(); }),
+      eventType: safeTriggerValue(function() { return String(trigger.getEventType()); }),
+      source: safeTriggerValue(function() { return String(trigger.getTriggerSource()); }),
+      sourceId: safeTriggerValue(function() { return trigger.getTriggerSourceId(); }),
+      isCopyTrigger: safeTriggerValue(function() {
+        return trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER;
+      }) === true
+    };
+  });
+}
+
+function safeTriggerValue(readValue) {
+  try {
+    const value = readValue();
+    return value === null || value === undefined ? '' : value;
+  } catch(e) {
+    return '';
+  }
 }
 
 // =====================================================================

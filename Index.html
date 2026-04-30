@@ -165,6 +165,13 @@
         .bg-actions{display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px}
         .bg-actions .btn-sm{width:100%}
         @media(min-width:440px){.bg-actions{grid-template-columns:1fr 1fr 1fr}}
+        .trigger-grid{display:grid;grid-template-columns:1fr;gap:8px}
+        .trigger-item{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;color:var(--muted);line-height:1.5}
+        .trigger-item strong{color:var(--text)}
+        .trigger-item.copy{border-color:rgba(52,211,153,0.45);background:var(--accent-glow)}
+        .trigger-badge{display:inline-flex;align-items:center;border:1px solid var(--border-light);border-radius:999px;padding:2px 7px;font-size:10px;color:var(--muted);margin-left:4px}
+        .trigger-badge.ok{border-color:rgba(52,211,153,0.45);color:var(--accent)}
+        .trigger-meta{display:grid;grid-template-columns:1fr;gap:4px;margin-top:6px}
 
         /* Spinner */
         .spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(56,189,248,0.3);border-top-color:var(--accent2);border-radius:50%;animation:spin .7s linear infinite}
@@ -312,6 +319,7 @@
 
         <div class="tabs">
             <button class="tab active" onclick="switchTab('copy')">⬇ Copy</button>
+            <button class="tab" onclick="switchTab('triggers')">⏱ Trigger</button>
             <button class="tab" onclick="switchTab('history')">🕒 Lịch sử</button>
             <button class="tab" onclick="switchTab('manage')">⚙ Quản lý</button>
         </div>
@@ -409,6 +417,27 @@
             <button class="btn-danger-outline btn" onclick="clearHist()">🗑 Xoá toàn bộ lịch sử</button>
         </div>
 
+        <!-- TRIGGER PANEL -->
+        <div id="panel-triggers" class="panel">
+            <div class="card">
+                <div class="card-title">⏱ Copy & trigger</div>
+                <div class="bg-status" id="triggerCopyState">Đang kiểm tra...</div>
+                <div class="bg-actions">
+                    <button class="btn-sm ghost" onclick="loadTriggerDashboard()">Làm mới</button>
+                    <button class="btn-sm green" onclick="resumeTriggerCopy()">Chạy tiếp ngay</button>
+                    <button class="btn-sm ghost" onclick="cancelTriggerCopy()" style="border-color:var(--danger);color:var(--danger)">Hủy phiên nền</button>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">📡 Trigger trong Apps Script</div>
+                <div id="triggerList" class="trigger-grid"></div>
+            </div>
+            <div class="card">
+                <div class="card-title">📊 Giới hạn hiện tại</div>
+                <div id="triggerLimits" class="trigger-grid"></div>
+            </div>
+        </div>
+
         <!-- MANAGE PANEL -->
         <div id="panel-manage" class="panel">
             <!-- Drive Info Card -->
@@ -490,11 +519,12 @@
 
     /* ============ TABS ============ */
     function switchTab(tab) {
-        const tabs = ['copy','history','manage'];
+        const tabs = ['copy','triggers','history','manage'];
         document.querySelectorAll('.tab').forEach((t,i) =>
             t.classList.toggle('active', tabs[i] === tab));
         document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
         document.getElementById('panel-' + tab).classList.add('active');
+        if (tab === 'triggers') loadTriggerDashboard();
         if (tab === 'history') loadHistory();
         if (tab === 'manage') {
             loadDriveInfo();
@@ -757,6 +787,128 @@
 	            .withFailureHandler(e => {
 	                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
 	                refreshBackgroundStatus();
+	            })
+	            .cancelCopy();
+	    }
+
+	    function loadTriggerDashboard() {
+	        const stateEl = document.getElementById('triggerCopyState');
+	        const listEl = document.getElementById('triggerList');
+	        const limitsEl = document.getElementById('triggerLimits');
+	        if (!stateEl || !listEl || !limitsEl) return;
+	        stateEl.innerHTML = '<span class="spin"></span> Đang kiểm tra trigger...';
+	        listEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
+	        limitsEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
+	        google.script.run
+	            .withSuccessHandler(renderTriggerDashboard)
+	            .withFailureHandler(e => {
+	                stateEl.innerHTML = '<span class="bad">Không thể đọc trigger:</span> ' + escHtml(e.message);
+	                listEl.innerHTML = '';
+	                limitsEl.innerHTML = '';
+	            })
+	            .getTriggerDashboard();
+	    }
+
+	    function renderTriggerDashboard(data) {
+	        renderTriggerCopyState(data.copyStatus || {}, data.appMode || {});
+	        renderTriggerList(data.triggers || [], data.copyStatus || {});
+	        renderTriggerLimits(data.limits || {}, data.appMode || {});
+	    }
+
+	    function renderTriggerCopyState(status, appMode) {
+	        const el = document.getElementById('triggerCopyState');
+	        const labelMap = {
+	            running: '<span class="ok">Đang chạy</span>',
+	            scheduled: '<span class="ok">Đã hẹn chạy</span>',
+	            done: '<span class="ok">Hoàn thành</span>',
+	            cancelled: '<span class="warn">Đã hủy</span>',
+	            error: '<span class="bad">Có lỗi</span>',
+	            idle: '<span>Không chạy</span>'
+	        };
+	        const modeText = appMode.parallelCopyEnabled
+	            ? 'Cho phép nhiều phiên copy'
+	            : 'Đang khóa 1 phiên copy';
+	        el.innerHTML =
+	            '<div>Trạng thái: <strong>' + (labelMap[status.status] || escHtml(status.status || 'idle')) + '</strong></div>' +
+	            '<div class="bg-meta">' +
+	                '<div>Phiên copy: <strong>' + escHtml(modeText) + '</strong></div>' +
+	                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
+	                '<div>Trigger copy: <strong>' + (status.triggerCount || 0) + '</strong></div>' +
+	                (status.nextTriggerAt ? '<div>Dự kiến chạy tiếp: <strong>' + fmtTime(status.nextTriggerAt) + '</strong></div>' : '') +
+	                (status.current ? '<div>Việc hiện tại: <strong>' + escHtml(status.current) + '</strong></div>' : '') +
+	                (!appMode.parallelCopyEnabled && appMode.reason ? '<div style="color:var(--warn)">' + escHtml(appMode.reason) + '</div>' : '') +
+	            '</div>';
+	    }
+
+	    function renderTriggerList(triggers, status) {
+	        const el = document.getElementById('triggerList');
+	        if (!triggers.length) {
+	            el.innerHTML = '<div class="trigger-item">Không có trigger nào trong project.</div>';
+	            return;
+	        }
+	        el.innerHTML = triggers.map(trigger => {
+	            const isCopy = trigger.isCopyTrigger || trigger.handler === 'continueCopyByTrigger';
+	            const nextRun = isCopy && status.nextTriggerAt
+	                ? '<div>Ước tính chạy tiếp: <strong>' + fmtTime(status.nextTriggerAt) + '</strong></div>'
+	                : '';
+	            return '<div class="trigger-item ' + (isCopy ? 'copy' : '') + '">' +
+	                '<div><strong>' + escHtml(trigger.handler || 'Không rõ handler') + '</strong>' +
+	                    (isCopy ? '<span class="trigger-badge ok">copy nền</span>' : '<span class="trigger-badge">khác</span>') +
+	                '</div>' +
+	                '<div class="trigger-meta">' +
+	                    '<div>ID: <strong>' + escHtml(trigger.id || '—') + '</strong></div>' +
+	                    '<div>Loại: <strong>' + escHtml(trigger.eventType || '—') + '</strong></div>' +
+	                    '<div>Nguồn: <strong>' + escHtml(trigger.source || '—') + '</strong></div>' +
+	                    nextRun +
+	                '</div>' +
+	            '</div>';
+	        }).join('');
+	    }
+
+	    function renderTriggerLimits(limits, appMode) {
+	        const el = document.getElementById('triggerLimits');
+	        el.innerHTML =
+	            '<div class="trigger-item">' +
+	                '<div>Apps Script: <strong>' + (appMode.appsScriptSupportsParallelExecutions ? 'có hỗ trợ execution song song' : 'không rõ') + '</strong></div>' +
+	                '<div class="trigger-meta">' +
+	                    '<div>Runtime mỗi lần chạy: <strong>' + (limits.scriptRuntimeMin || 6) + ' phút</strong></div>' +
+	                    '<div>Đồng thời mỗi user: <strong>' + (limits.simultaneousExecutionsPerUser || 30) + '</strong></div>' +
+	                    '<div>Đồng thời mỗi script: <strong>' + (limits.simultaneousExecutionsPerScript || 1000) + '</strong></div>' +
+	                    '<div>Trigger mỗi user/script: <strong>' + (limits.triggersPerUserPerScript || 20) + '</strong></div>' +
+	                    '<div>Runtime trigger/ngày: <strong>' + (limits.triggerRuntimeConsumerMinPerDay || 90) + ' phút Gmail · ' + (limits.triggerRuntimeWorkspaceHrPerDay || 6) + ' giờ Workspace</strong></div>' +
+	                '</div>' +
+	            '</div>';
+	    }
+
+	    function resumeTriggerCopy() {
+	        const el = document.getElementById('triggerCopyState');
+	        el.innerHTML = '<span class="spin"></span> Đang chạy tiếp phiên nền...';
+	        google.script.run
+	            .withSuccessHandler(() => {
+	                refreshBackgroundStatus();
+	                loadTriggerDashboard();
+	            })
+	            .withFailureHandler(e => {
+	                el.innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
+	            })
+	            .resumeCopyNow();
+	    }
+
+	    function cancelTriggerCopy() {
+	        const el = document.getElementById('triggerCopyState');
+	        el.innerHTML = '<span class="spin"></span> Đang hủy phiên nền...';
+	        google.script.run
+	            .withSuccessHandler(() => {
+	                stopPolling();
+	                copyRunning = false;
+	                const btn = document.getElementById('copyBtn');
+	                btn.disabled = false;
+	                btn.innerHTML = '⬇ Bắt đầu Copy';
+	                refreshBackgroundStatus();
+	                loadTriggerDashboard();
+	            })
+	            .withFailureHandler(e => {
+	                el.innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
 	            })
 	            .cancelCopy();
 	    }
