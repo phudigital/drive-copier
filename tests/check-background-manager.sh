@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CODE_FILE="$ROOT_DIR/code.gs"
-HTML_FILE="$ROOT_DIR/index.html"
+CODE_FILE="$ROOT_DIR/Code.gs"
+HTML_FILE="$ROOT_DIR/Index.html"
 
 assert_contains() {
   local file="$1"
@@ -23,6 +23,7 @@ assert_contains "$CODE_FILE" "function cancelCopy\\(" "backend exposes a cancel 
 assert_contains "$CODE_FILE" "function resumeCopyNow\\(" "backend exposes a manual resume API"
 assert_contains "$CODE_FILE" "triggerCount" "status payload reports scheduled background triggers"
 assert_contains "$CODE_FILE" "nextTriggerAt" "status payload reports expected next trigger time"
+assert_contains "$CODE_FILE" "const COPY_BATCH_MS = 180000;" "copy batches leave enough buffer below Apps Script's 6-minute runtime limit"
 
 assert_contains "$HTML_FILE" "backgroundStatus" "UI includes a background status surface"
 assert_contains "$HTML_FILE" "getCopyStatus\\(" "UI refreshes copy status from backend"
