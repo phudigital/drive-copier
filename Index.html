@@ -1218,17 +1218,23 @@
                       </div>
                       <div class="space-bar-bg"><div class="space-bar-used" style="width:${afterPct}%;background:${barColor}"></div></div>
                     </div>`;
-                const partialHtml = r.partial
-                    ? '<div style="margin-top:6px;color:var(--warn)">⚠ Folder lớn: chỉ quét ' + r.scannedFiles + ' file / ' + r.scannedFolders + ' folder đầu tiên để tránh quá tải. Dung lượng thật có thể lớn hơn.</div>'
-                    : '';
+                let scanNote = '';
                 if (r.partial) {
-                    showSpaceResult('warn','⚠ Ước tính một phần — Cần ít nhất: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
+                    const reason = r.timedOut
+                        ? 'quá thời gian quét an toàn'
+                        : (r.depthLimitHit ? 'phát hiện folder sâu hơn ' + r.maxDepth + ' cấp' : 'chưa quét hết');
+                    scanNote = '<div style="margin-top:6px;color:var(--warn)">⚠ Ước tính một phần: đã quét ' + r.scannedFiles + ' file / ' + r.scannedFolders + ' folder, sâu nhất ' + r.maxDepthReached + '/' + r.maxDepth + ' cấp; lý do: ' + reason + '. Dung lượng thật có thể lớn hơn.</div>';
+                } else if (r.maxDepth) {
+                    scanNote = '<div style="margin-top:6px;color:var(--accent)">✅ Đã quét đủ ' + r.scannedFiles + ' file / ' + r.scannedFolders + ' folder trong tối đa ' + r.maxDepth + ' cấp.</div>';
+                }
+                if (r.partial) {
+                    showSpaceResult('warn','⚠ Ước tính một phần — Cần ít nhất: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+scanNote);
                     return;
                 }
                 if (r.enough) {
-                    showSpaceResult('ok','✅ Đủ — Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
+                    showSpaceResult('ok','✅ Đủ — Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+scanNote);
                 } else {
-                    showSpaceResult('warn','⚠ Thiếu <strong>'+fmt(r.estimated-r.free)+'</strong>. Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
+                    showSpaceResult('warn','⚠ Thiếu <strong>'+fmt(r.estimated-r.free)+'</strong>. Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+scanNote);
                 }
             })
             .withFailureHandler(e => {

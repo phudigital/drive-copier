@@ -1,9 +1,9 @@
 // ============================================================
-//  DRIVE COPIER - Code.gs  (v3.8 — 2026-05-01)
+//  DRIVE COPIER - Code.gs  (v3.9 — 2026-05-01)
 //  Email + storage header · Drive info · folder sizes
 // ============================================================
 
-const APP_VERSION  = '3.8';
+const APP_VERSION  = '3.9';
 const APP_UPDATED  = '2026-05-01';
 const HISTORY_KEY  = 'copy_history';
 const PROGRESS_KEY = 'copy_progress';
@@ -12,9 +12,8 @@ const COPY_BATCH_MS = 180000;
 const COPY_ERROR_LIMIT = 30;
 const COPY_RETRY_LIMIT = 3;
 const COPY_RETRY_DELAY_MS = 1200;
-const SPACE_CHECK_MS = 20000;
-const SPACE_CHECK_FILE_LIMIT = 2000;
-const SPACE_CHECK_FOLDER_LIMIT = 500;
+const SPACE_CHECK_MS = 120000;
+const SPACE_CHECK_MAX_DEPTH = 5;
 const MANAGE_SCAN_MS = 25000;
 const MANAGE_SCAN_FILE_LIMIT = 5000;
 const MANAGE_SCAN_FOLDER_LIMIT = 1000;
@@ -332,50 +331,78 @@ function estimateFolderSize(folder) {
 }
 
 function estimateFolderSizeLimited(rootFolder) {
-  const startTime = Date.now();
-  const pending = [rootFolder.getId()];
+  return estimateFolderSizeByDepth(rootFolder.getId(), SPACE_CHECK_MAX_DEPTH);
+}
+
+function estimateFolderSizeByDepth(rootFolderId, maxDepth) {
+  const deadlineAt = Date.now() + SPACE_CHECK_MS;
+  const pending = [{ id: rootFolderId, depth: 0 }];
+  let cursor = 0;
   let size = 0;
   let scannedFiles = 0;
   let scannedFolders = 0;
+  let maxDepthReached = 0;
   let partial = false;
+  let depthLimitHit = false;
+  let timedOut = false;
 
-  while (pending.length) {
-    if (Date.now() - startTime > SPACE_CHECK_MS || scannedFiles >= SPACE_CHECK_FILE_LIMIT || scannedFolders >= SPACE_CHECK_FOLDER_LIMIT) {
+  while (cursor < pending.length) {
+    if (Date.now() > deadlineAt) {
       partial = true;
+      timedOut = true;
       break;
     }
 
-    const folder = DriveApp.getFolderById(pending.pop());
+    const task = pending[cursor++];
     scannedFolders++;
+    maxDepthReached = Math.max(maxDepthReached, task.depth);
+    const query = `'${task.id}' in parents and trashed = false`;
+    let pageToken = null;
 
-    const files = folder.getFiles();
-    while (files.hasNext()) {
-      if (Date.now() - startTime > SPACE_CHECK_MS || scannedFiles >= SPACE_CHECK_FILE_LIMIT) {
+    do {
+      if (Date.now() > deadlineAt) {
         partial = true;
+        timedOut = true;
         break;
       }
-      size += files.next().getSize();
-      scannedFiles++;
-    }
-    if (partial) break;
 
-    const subs = folder.getFolders();
-    while (subs.hasNext()) {
-      if (Date.now() - startTime > SPACE_CHECK_MS || scannedFolders + pending.length >= SPACE_CHECK_FOLDER_LIMIT) {
-        partial = true;
-        break;
-      }
-      pending.push(subs.next().getId());
-    }
-    if (partial) break;
+      const resp = Drive.Files.list({
+        q: query,
+        fields: 'nextPageToken, files(id, mimeType, size)',
+        pageSize: 1000,
+        pageToken: pageToken,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+      });
+
+      (resp.files || []).forEach(function(item) {
+        if (item.mimeType === 'application/vnd.google-apps.folder') {
+          if (task.depth >= maxDepth) {
+            partial = true;
+            depthLimitHit = true;
+            return;
+          }
+          pending.push({ id: item.id, depth: task.depth + 1 });
+          return;
+        }
+        scannedFiles++;
+        size += parseInt(item.size || '0');
+      });
+
+      pageToken = resp.nextPageToken;
+    } while (pageToken && !timedOut);
   }
 
-  if (pending.length) partial = true;
+  if (cursor < pending.length) partial = true;
   return {
     size: size,
     partial: partial,
     scannedFiles: scannedFiles,
-    scannedFolders: scannedFolders
+    scannedFolders: scannedFolders,
+    maxDepth: maxDepth,
+    maxDepthReached: maxDepthReached,
+    depthLimitHit: depthLimitHit,
+    timedOut: timedOut
   };
 }
 
@@ -395,6 +422,10 @@ function checkSpace(sourceUrl) {
   let partial = false;
   let scannedFiles = 0;
   let scannedFolders = 0;
+  let maxDepth = 0;
+  let maxDepthReached = 0;
+  let depthLimitHit = false;
+  let timedOut = false;
 
   if (type === 'folder') {
     const scan = estimateFolderSizeLimited(DriveApp.getFolderById(parsed.id));
@@ -402,6 +433,10 @@ function checkSpace(sourceUrl) {
     partial = scan.partial;
     scannedFiles = scan.scannedFiles;
     scannedFolders = scan.scannedFolders;
+    maxDepth = scan.maxDepth;
+    maxDepthReached = scan.maxDepthReached;
+    depthLimitHit = scan.depthLimitHit;
+    timedOut = scan.timedOut;
   } else {
     estimated = DriveApp.getFileById(parsed.id).getSize();
     scannedFiles = 1;
@@ -419,7 +454,11 @@ function checkSpace(sourceUrl) {
     unlimited: unlimited,
     partial:   partial,
     scannedFiles: scannedFiles,
-    scannedFolders: scannedFolders
+    scannedFolders: scannedFolders,
+    maxDepth: maxDepth,
+    maxDepthReached: maxDepthReached,
+    depthLimitHit: depthLimitHit,
+    timedOut: timedOut
   };
 }
 
