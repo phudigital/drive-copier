@@ -15,6 +15,9 @@ const COPY_RETRY_DELAY_MS = 1200;
 const SPACE_CHECK_MS = 20000;
 const SPACE_CHECK_FILE_LIMIT = 2000;
 const SPACE_CHECK_FOLDER_LIMIT = 500;
+const MANAGE_SCAN_MS = 25000;
+const MANAGE_SCAN_FILE_LIMIT = 5000;
+const MANAGE_SCAN_FOLDER_LIMIT = 1000;
 const COPY_TRIGGER_HANDLER = 'continueCopyByTrigger';
 const COPY_TRIGGER_DELAY_MS = 60000;
 
@@ -82,43 +85,97 @@ function getFolders(parentId) {
 }
 
 /**
- * Trả về danh sách thư mục kèm dung lượng (file trực tiếp, không đệ quy)
- * Dùng cho tab Quản lý. Có timeout protection 25s.
+ * Trả về danh sách thư mục kèm dung lượng đệ quy.
+ * Dùng cho tab Quản lý. Có timeout protection để tránh treo với cây quá lớn.
  */
 function getFoldersManage(parentId) {
   parentId = parentId || 'root';
   const folders = getFolders(parentId);
-  const startTime = Date.now();
+  const deadlineAt = Date.now() + MANAGE_SCAN_MS;
 
   for (const folder of folders) {
-    // Timeout protection: nếu quá 25s thì dừng tính size
-    if (Date.now() - startTime > 25000) {
+    if (Date.now() > deadlineAt) {
       folder.fileCount = -1;
+      folder.folderCount = -1;
       folder.size = -1;
+      folder.partial = true;
       continue;
     }
     try {
-      const childQuery = `'${folder.id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
-      let totalSize = 0, fileCount = 0;
-      let pt = null;
-      do {
-        const r = Drive.Files.list({
-          q: childQuery,
-          fields: 'nextPageToken, files(size)',
-          pageSize: 1000,
-          pageToken: pt
-        });
-        (r.files || []).forEach(f => { fileCount++; totalSize += parseInt(f.size || '0'); });
-        pt = r.nextPageToken;
-      } while (pt);
-      folder.fileCount = fileCount;
-      folder.size = totalSize;
+      const summary = summarizeFolderTreeLimited(folder.id, deadlineAt);
+      folder.fileCount = summary.fileCount;
+      folder.folderCount = summary.folderCount;
+      folder.size = summary.size;
+      folder.partial = summary.partial;
     } catch(e) {
       folder.fileCount = -1;
+      folder.folderCount = -1;
       folder.size = -1;
+      folder.partial = true;
     }
   }
   return folders;
+}
+
+function summarizeFolderTreeLimited(rootFolderId, deadlineAt) {
+  const pending = [rootFolderId];
+  let size = 0;
+  let fileCount = 0;
+  let folderCount = 0;
+  let partial = false;
+
+  while (pending.length) {
+    if (Date.now() > deadlineAt || fileCount >= MANAGE_SCAN_FILE_LIMIT || folderCount >= MANAGE_SCAN_FOLDER_LIMIT) {
+      partial = true;
+      break;
+    }
+
+    const folderId = pending.pop();
+    const query = `'${folderId}' in parents and trashed = false`;
+    let pageToken = null;
+
+    do {
+      if (Date.now() > deadlineAt || fileCount >= MANAGE_SCAN_FILE_LIMIT || folderCount >= MANAGE_SCAN_FOLDER_LIMIT) {
+        partial = true;
+        break;
+      }
+
+      const resp = Drive.Files.list({
+        q: query,
+        fields: 'nextPageToken, files(id, mimeType, size)',
+        pageSize: 1000,
+        pageToken: pageToken
+      });
+
+      (resp.files || []).forEach(function(item) {
+        if (partial) return;
+        if (item.mimeType === 'application/vnd.google-apps.folder') {
+          folderCount++;
+          if (folderCount >= MANAGE_SCAN_FOLDER_LIMIT) {
+            partial = true;
+            return;
+          }
+          pending.push(item.id);
+        } else {
+          fileCount++;
+          size += parseInt(item.size || '0');
+          if (fileCount >= MANAGE_SCAN_FILE_LIMIT) {
+            partial = true;
+          }
+        }
+      });
+
+      pageToken = resp.nextPageToken;
+    } while (pageToken && !partial);
+  }
+
+  if (pending.length) partial = true;
+  return {
+    size: size,
+    fileCount: fileCount,
+    folderCount: folderCount,
+    partial: partial
+  };
 }
 
 /** Tạo thư mục mới, trả về { id, name } */

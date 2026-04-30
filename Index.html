@@ -917,13 +917,16 @@
                     el.className = 'mng-folder-item';
                     let sizeHtml = '';
                     if (f.fileCount !== undefined && f.fileCount >= 0) {
-                        sizeHtml = '<div class="mng-folder-size">' + fmtBytes(f.size) + '</div>';
+                        const sizePrefix = f.partial ? '≥ ' : '';
+                        sizeHtml = '<div class="mng-folder-size">' + sizePrefix + fmtBytes(f.size) + '</div>';
                     } else if (f.fileCount === -1) {
                         sizeHtml = '<div class="mng-folder-size" style="color:var(--border-light)">—</div>';
                     }
-                    const metaText = f.fileCount !== undefined && f.fileCount >= 0
-                        ? f.fileCount + ' file'
-                        : '';
+                    const metaParts = [];
+                    if (f.fileCount !== undefined && f.fileCount >= 0) metaParts.push(f.fileCount + ' file');
+                    if (f.folderCount !== undefined && f.folderCount > 0) metaParts.push(f.folderCount + ' folder con');
+                    if (f.partial) metaParts.push('chưa quét hết');
+                    const metaText = metaParts.join(' · ');
                     el.innerHTML = '<div class="mng-folder-icon">📁</div>' +
                         '<div class="mng-folder-body">' +
                             '<div class="mng-folder-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' +
