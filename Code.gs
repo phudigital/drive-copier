@@ -1,12 +1,22 @@
 // ============================================================
-//  DRIVE COPIER - Code.gs  (v3.5 — 2025-03-13)
+//  DRIVE COPIER - Code.gs  (v3.8 — 2026-05-01)
 //  Email + storage header · Drive info · folder sizes
 // ============================================================
 
-const APP_VERSION  = '3.5';
-const APP_UPDATED  = '2025-03-13';
+const APP_VERSION  = '3.8';
+const APP_UPDATED  = '2026-05-01';
 const HISTORY_KEY  = 'copy_history';
 const PROGRESS_KEY = 'copy_progress';
+const COPY_STATE_KEY = 'copy_state';
+const COPY_BATCH_MS = 240000;
+const COPY_ERROR_LIMIT = 30;
+const COPY_RETRY_LIMIT = 3;
+const COPY_RETRY_DELAY_MS = 1200;
+const SPACE_CHECK_MS = 20000;
+const SPACE_CHECK_FILE_LIMIT = 2000;
+const SPACE_CHECK_FOLDER_LIMIT = 500;
+const COPY_TRIGGER_HANDLER = 'continueCopyByTrigger';
+const COPY_TRIGGER_DELAY_MS = 60000;
 
 // ---------- Entry point ----------
 function doGet() {
@@ -211,6 +221,22 @@ function clearProgress() {
   PropertiesService.getUserProperties().deleteProperty(PROGRESS_KEY);
 }
 
+function saveCopyState(state) {
+  PropertiesService.getUserProperties().setProperty(COPY_STATE_KEY, JSON.stringify(state));
+}
+
+function getCopyState() {
+  try {
+    return JSON.parse(
+      PropertiesService.getUserProperties().getProperty(COPY_STATE_KEY) || 'null'
+    );
+  } catch(e) { return null; }
+}
+
+function clearCopyState() {
+  PropertiesService.getUserProperties().deleteProperty(COPY_STATE_KEY);
+}
+
 // =====================================================================
 //  COUNT total files in folder tree (progress denominator)
 // =====================================================================
@@ -248,8 +274,56 @@ function estimateFolderSize(folder) {
   return size;
 }
 
+function estimateFolderSizeLimited(rootFolder) {
+  const startTime = Date.now();
+  const pending = [rootFolder.getId()];
+  let size = 0;
+  let scannedFiles = 0;
+  let scannedFolders = 0;
+  let partial = false;
+
+  while (pending.length) {
+    if (Date.now() - startTime > SPACE_CHECK_MS || scannedFiles >= SPACE_CHECK_FILE_LIMIT || scannedFolders >= SPACE_CHECK_FOLDER_LIMIT) {
+      partial = true;
+      break;
+    }
+
+    const folder = DriveApp.getFolderById(pending.pop());
+    scannedFolders++;
+
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      if (Date.now() - startTime > SPACE_CHECK_MS || scannedFiles >= SPACE_CHECK_FILE_LIMIT) {
+        partial = true;
+        break;
+      }
+      size += files.next().getSize();
+      scannedFiles++;
+    }
+    if (partial) break;
+
+    const subs = folder.getFolders();
+    while (subs.hasNext()) {
+      if (Date.now() - startTime > SPACE_CHECK_MS || scannedFolders + pending.length >= SPACE_CHECK_FOLDER_LIMIT) {
+        partial = true;
+        break;
+      }
+      pending.push(subs.next().getId());
+    }
+    if (partial) break;
+  }
+
+  if (pending.length) partial = true;
+  return {
+    size: size,
+    partial: partial,
+    scannedFiles: scannedFiles,
+    scannedFolders: scannedFolders
+  };
+}
+
 /** Kiểm tra dung lượng trước khi copy.
- *  Trả về { free, total, used, estimated, enough, unlimited }
+ *  Folder lớn chỉ quét có giới hạn để tránh Apps Script bị treo/quá tải.
  */
 function checkSpace(sourceUrl) {
   const parsed = parseId(sourceUrl);
@@ -261,14 +335,23 @@ function checkSpace(sourceUrl) {
 
   const space = getDriveSpace();
   let estimated = 0;
+  let partial = false;
+  let scannedFiles = 0;
+  let scannedFolders = 0;
+
   if (type === 'folder') {
-    estimated = estimateFolderSize(DriveApp.getFolderById(parsed.id));
+    const scan = estimateFolderSizeLimited(DriveApp.getFolderById(parsed.id));
+    estimated = scan.size;
+    partial = scan.partial;
+    scannedFiles = scan.scannedFiles;
+    scannedFolders = scan.scannedFolders;
   } else {
     estimated = DriveApp.getFileById(parsed.id).getSize();
+    scannedFiles = 1;
   }
 
   const unlimited = space.free === -1;
-  const enough    = unlimited || space.free >= estimated;
+  const enough    = unlimited || (!partial && space.free >= estimated);
 
   return {
     free:      space.free,
@@ -276,7 +359,10 @@ function checkSpace(sourceUrl) {
     used:      space.used,
     estimated: estimated,
     enough:    enough,
-    unlimited: unlimited
+    unlimited: unlimited,
+    partial:   partial,
+    scannedFiles: scannedFiles,
+    scannedFolders: scannedFolders
   };
 }
 
@@ -288,8 +374,10 @@ function checkSpace(sourceUrl) {
 function copyItem(sourceUrl, destFolderId, overwriteMode) {
   overwriteMode = overwriteMode || 'rename';
 
-  // Xóa progress cũ trước khi bắt đầu
+  // Xóa progress/trạng thái cũ trước khi bắt đầu phiên copy mới.
   clearProgress();
+  clearCopyState();
+  clearCopyTriggers();
 
   const parsed = parseId(sourceUrl);
   if (!parsed) throw new Error('Không nhận ra định dạng link/ID. Vui lòng kiểm tra lại.');
@@ -302,36 +390,204 @@ function copyItem(sourceUrl, destFolderId, overwriteMode) {
     ? DriveApp.getRootFolder()
     : DriveApp.getFolderById(destFolderId);
 
-  // Count total files for progress bar
-  let total = 1;
-  if (type === 'folder') {
-    const srcForCount = DriveApp.getFolderById(parsed.id);
-    total = countFiles(srcForCount) || 1;
-  }
-
-  setProgress({ done: 0, total: total, current: 'Đang chuẩn bị...', errors: [], status: 'running' });
-
   let result;
   try {
     if (type === 'folder') {
       const src = DriveApp.getFolderById(parsed.id);
-      const counter = { done: 0, total: total };
-      result = copyFolderRecursive(src, destFolder, overwriteMode, counter);
+      const rootDest = prepareDestinationFolder(src.getName(), destFolder, overwriteMode);
+      const state = {
+        status: 'running',
+        source: sourceUrl,
+        destName: destFolder.getName(),
+        type: type,
+        name: src.getName(),
+        overwriteMode: overwriteMode,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        nextTriggerAt: null,
+        lastCurrent: 'Đang chuẩn bị copy theo lô...',
+        files: 0,
+        bytesCopied: 0,
+        folders: 1,
+        errors: [],
+        stack: [{
+          srcId: src.getId(),
+          destId: rootDest.getId(),
+          phase: 'files',
+          filesToken: null,
+          subsToken: null
+        }]
+      };
+      saveCopyState(state);
+      setProgress({
+        done: 0,
+        total: 0,
+        current: 'Đang chuẩn bị copy theo lô...',
+        bytesCopied: 0,
+        errors: [],
+        status: 'running'
+      });
+      result = processCopyState(state);
     } else {
       const src = DriveApp.getFileById(parsed.id);
       setProgress({ done: 0, total: 1, current: src.getName(), errors: [], status: 'running' });
-      copySingleFile(src, destFolder, overwriteMode);
-      result = { name: src.getName(), files: 1, folders: 0, errors: [] };
+      const fileSize = src.getSize();
+      const copyStatus = copySingleFile(src, destFolder, overwriteMode);
+      const bytesCopied = copyStatus === 'skipped' ? 0 : fileSize;
+      const result = { name: src.getName(), files: 1, folders: 0, bytesCopied: bytesCopied, errors: [], status: 'done' };
+      finishCopy(result, sourceUrl, destFolder.getName(), type);
+      return result;
     }
   } catch(e) {
-    setProgress({ done: 0, total: total, current: '', errors: [e.message], status: 'error' });
+    const failedState = getCopyState();
+    if (failedState) {
+      failedState.status = 'error';
+      failedState.updatedAt = Date.now();
+      failedState.lastCurrent = e.message;
+      saveCopyState(failedState);
+    }
+    clearCopyTriggers();
+    setProgress({ done: 0, total: 0, current: '', errors: [e.message], status: 'error' });
     throw e;
   }
 
+  if (result.status === 'done') {
+    finishCopy(result, sourceUrl, destFolder.getName(), type);
+  }
+
+  return result;
+}
+
+function continueCopy() {
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(1000)) {
+    const state = getCopyState();
+    return state ? stateToRunningResult(state) : {
+      name: '',
+      files: 0,
+      folders: 0,
+      bytesCopied: 0,
+      errors: [],
+      status: 'running'
+    };
+  }
+
+  const state = getCopyState();
+  try {
+    if (!state || state.status !== 'running') {
+      throw new Error('Không có phiên copy đang chạy để tiếp tục.');
+    }
+    const result = processCopyState(state);
+    if (result.status === 'done') {
+      finishCopy(result, state.source, state.destName, state.type);
+    }
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function continueCopyByTrigger() {
+  try {
+    const state = getCopyState();
+    if (!state || state.status !== 'running') {
+      clearCopyTriggers();
+      return;
+    }
+    continueCopy();
+  } catch(e) {
+    const state = getCopyState();
+    if (state) {
+      state.status = 'error';
+      state.updatedAt = Date.now();
+      state.lastCurrent = e.message;
+      saveCopyState(state);
+    }
+    clearCopyTriggers();
+    setProgress({
+      done: 0,
+      total: 0,
+      current: '',
+      errors: [e.message],
+      status: 'error'
+    });
+  }
+}
+
+function getCopyStatus() {
+  const progress = getProgress();
+  const state = getCopyState();
+  const triggerCount = getCopyTriggerCount();
+  const progressStatus = progress && progress.status ? progress.status : '';
+  const stateStatus = state && state.status ? state.status : '';
+  let status = progressStatus || stateStatus || (triggerCount ? 'scheduled' : 'idle');
+
+  if (stateStatus === 'running' && !triggerCount && progressStatus === 'running') {
+    status = 'running';
+  } else if (stateStatus === 'running' && triggerCount) {
+    status = 'running';
+  } else if (stateStatus === 'error') {
+    status = 'error';
+  }
+
+  return {
+    status: status,
+    running: status === 'running' || status === 'scheduled',
+    hasState: !!state,
+    hasTrigger: triggerCount > 0,
+    triggerCount: triggerCount,
+    triggerHandler: COPY_TRIGGER_HANDLER,
+    source: state ? state.source : '',
+    destName: state ? state.destName : '',
+    name: (progress && progress.name) || (state && state.name) || '',
+    current: (progress && progress.current) || (state && state.lastCurrent) || '',
+    files: (progress && typeof progress.done === 'number') ? progress.done : (state ? state.files : 0),
+    folders: (progress && typeof progress.folders === 'number') ? progress.folders : (state ? state.folders : 0),
+    bytesCopied: (progress && typeof progress.bytesCopied === 'number') ? progress.bytesCopied : (state ? state.bytesCopied || 0 : 0),
+    errors: (progress && progress.errors) || (state && state.errors) || [],
+    startedAt: state ? state.startedAt || null : null,
+    updatedAt: (progress && progress._ts) || (state && state.updatedAt) || null,
+    nextTriggerAt: state ? state.nextTriggerAt || null : null
+  };
+}
+
+function cancelCopy() {
+  const state = getCopyState();
+  const progress = getProgress();
+  clearCopyTriggers();
+  clearCopyState();
+
+  setProgress({
+    done: (progress && typeof progress.done === 'number') ? progress.done : (state ? state.files : 0),
+    total: 0,
+    current: 'Đã hủy phiên copy nền.',
+    name: (progress && progress.name) || (state && state.name) || '',
+    folders: (progress && typeof progress.folders === 'number') ? progress.folders : (state ? state.folders : 0),
+    bytesCopied: (progress && typeof progress.bytesCopied === 'number') ? progress.bytesCopied : (state ? state.bytesCopied || 0 : 0),
+    errors: (progress && progress.errors) || (state && state.errors) || [],
+    status: 'cancelled'
+  });
+
+  return getCopyStatus();
+}
+
+function resumeCopyNow() {
+  const state = getCopyState();
+  if (!state || state.status !== 'running') {
+    return getCopyStatus();
+  }
+  continueCopy();
+  return getCopyStatus();
+}
+
+function finishCopy(result, sourceUrl, destName, type) {
   setProgress({
     done: result.files,
-    total: total,
+    total: result.files || 1,
     current: 'Hoàn thành',
+    name: result.name,
+    folders: result.folders || 0,
+    bytesCopied: result.bytesCopied || 0,
     errors: result.errors,
     status: 'done'
   });
@@ -339,15 +595,74 @@ function copyItem(sourceUrl, destFolderId, overwriteMode) {
   saveHistory({
     date: new Date().toLocaleString('vi-VN'),
     source: sourceUrl,
-    dest: destFolder.getName(),
+    dest: destName,
     type: type,
     name: result.name,
     files: result.files,
     folders: result.folders,
+    bytesCopied: result.bytesCopied || 0,
     errors: result.errors.length
   });
+  clearCopyTriggers();
+  clearCopyState();
+}
 
-  return result;
+function stateToRunningResult(state) {
+  return {
+    name: state.name,
+    files: state.files,
+    folders: state.folders,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors || [],
+    status: 'running'
+  };
+}
+
+function stateToCancelledResult(state) {
+  state.status = 'cancelled';
+  return {
+    name: state.name,
+    files: state.files,
+    folders: state.folders,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors || [],
+    status: 'cancelled'
+  };
+}
+
+function isCopyCancelled(state) {
+  const liveState = getCopyState();
+  return !liveState || liveState.status !== 'running' || liveState.startedAt !== state.startedAt;
+}
+
+function scheduleCopyTrigger() {
+  clearCopyTriggers();
+  const nextTriggerAt = Date.now() + COPY_TRIGGER_DELAY_MS;
+  ScriptApp.newTrigger(COPY_TRIGGER_HANDLER)
+    .timeBased()
+    .after(COPY_TRIGGER_DELAY_MS)
+    .create();
+  return nextTriggerAt;
+}
+
+function clearCopyTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+}
+
+function getCopyTriggerCount() {
+  let count = 0;
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER) {
+      count++;
+    }
+  });
+  return count;
 }
 
 // =====================================================================
@@ -368,64 +683,177 @@ function copySingleFile(srcFile, destFolder, overwriteMode) {
   }
 
   // 'rename': makeCopy tự thêm (1), (2)... nếu trùng tên
-  srcFile.makeCopy(name, destFolder);
+  withDriveRetry(function() {
+    return srcFile.makeCopy(name, destFolder);
+  });
   return 'copied';
 }
 
-// =====================================================================
-//  RECURSIVE FOLDER COPY
-// =====================================================================
-
-function copyFolderRecursive(srcFolder, destParent, overwriteMode, counter) {
-  const name = srcFolder.getName();
-  let destSub;
-
+function prepareDestinationFolder(name, destParent, overwriteMode) {
   if (overwriteMode === 'overwrite') {
     const existing = destParent.getFoldersByName(name);
-    destSub = existing.hasNext() ? existing.next() : destParent.createFolder(name);
-  } else {
-    destSub = destParent.createFolder(name);
-  }
-
-  let totalFiles   = 0;
-  let totalFolders = 1;
-  const errors     = [];
-
-  // Copy files
-  const files = srcFolder.getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    try {
-      copySingleFile(f, destSub, overwriteMode);
-      totalFiles++;
-    } catch(e) {
-      errors.push('❌ ' + f.getName() + ': ' + e.message);
-    }
-    counter.done++;
-    setProgress({
-      done: counter.done,
-      total: counter.total,
-      current: f.getName(),
-      errors: errors,
-      status: 'running'
+    return existing.hasNext() ? existing.next() : withDriveRetry(function() {
+      return destParent.createFolder(name);
     });
   }
+  return withDriveRetry(function() {
+    return destParent.createFolder(name);
+  });
+}
 
-  // Recurse sub-folders
-  const subs = srcFolder.getFolders();
-  while (subs.hasNext()) {
-    const sub = subs.next();
+function withDriveRetry(operation) {
+  let lastError;
+  for (let attempt = 0; attempt < COPY_RETRY_LIMIT; attempt++) {
     try {
-      const r = copyFolderRecursive(sub, destSub, overwriteMode, counter);
-      totalFiles   += r.files;
-      totalFolders += r.folders;
-      errors.push(...r.errors);
+      return operation();
     } catch(e) {
-      errors.push('❌ 📁 ' + sub.getName() + ': ' + e.message);
+      lastError = e;
+      if (!isTransientDriveError(e) || attempt === COPY_RETRY_LIMIT - 1) break;
+      Utilities.sleep(COPY_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+function isTransientDriveError(error) {
+  const message = String(error && error.message || error || '');
+  return /Dịch vụ bị lỗi|Service error|Service invoked too many times|Rate Limit|User rate limit|Backend Error/i.test(message);
+}
+
+function rememberCopyError(state, message) {
+  state.errors.push(message);
+  if (state.errors.length > COPY_ERROR_LIMIT) {
+    state.errors = state.errors.slice(state.errors.length - COPY_ERROR_LIMIT);
+  }
+}
+
+function shouldPauseBatch(startTime) {
+  return Date.now() - startTime > COPY_BATCH_MS;
+}
+
+function saveRunningBatch(state, current) {
+  state.updatedAt = Date.now();
+  state.lastCurrent = current || 'Tạm dừng lô, đang chuẩn bị chạy tiếp...';
+  state.nextTriggerAt = scheduleCopyTrigger();
+  saveCopyState(state);
+  setProgress({
+    done: state.files,
+    total: 0,
+    current: state.lastCurrent,
+    name: state.name,
+    folders: state.folders || 0,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors,
+    status: 'running',
+    nextTriggerAt: state.nextTriggerAt
+  });
+  return stateToRunningResult(state);
+}
+
+function processCopyState(state) {
+  const startTime = Date.now();
+
+  while (state.stack.length) {
+    if (isCopyCancelled(state)) return stateToCancelledResult(state);
+
+    const task = state.stack[state.stack.length - 1];
+    const srcFolder = DriveApp.getFolderById(task.srcId);
+    const destFolder = DriveApp.getFolderById(task.destId);
+
+    if (task.phase === 'files') {
+      const files = task.filesToken
+        ? DriveApp.continueFileIterator(task.filesToken)
+        : srcFolder.getFiles();
+
+      while (files.hasNext()) {
+        if (state.files % 5 === 0 && isCopyCancelled(state)) return stateToCancelledResult(state);
+
+        if (shouldPauseBatch(startTime)) {
+          task.filesToken = files.getContinuationToken();
+          return saveRunningBatch(state, 'Đã copy ' + state.files + ' file. Đang chạy tiếp...');
+        }
+
+        const f = files.next();
+        const fileSize = f.getSize();
+        try {
+          const copyStatus = copySingleFile(f, destFolder, state.overwriteMode);
+          state.files++;
+          if (copyStatus !== 'skipped') state.bytesCopied += fileSize;
+        } catch(e) {
+          rememberCopyError(state, '❌ ' + f.getName() + ': ' + e.message);
+        }
+
+        if (state.files % 5 === 0) {
+          setProgress({
+            done: state.files,
+            total: 0,
+            current: f.getName(),
+            bytesCopied: state.bytesCopied || 0,
+            errors: state.errors,
+            status: 'running'
+          });
+        }
+      }
+
+      task.phase = 'folders';
+      task.filesToken = null;
+    }
+
+    if (task.phase === 'folders') {
+      const subs = task.subsToken
+        ? DriveApp.continueFolderIterator(task.subsToken)
+        : srcFolder.getFolders();
+
+      while (subs.hasNext()) {
+        if (isCopyCancelled(state)) return stateToCancelledResult(state);
+
+        if (shouldPauseBatch(startTime)) {
+          task.subsToken = subs.getContinuationToken();
+          return saveRunningBatch(state, 'Đã copy ' + state.files + ' file. Đang chạy tiếp...');
+        }
+
+        const sub = subs.next();
+        try {
+          const childDest = prepareDestinationFolder(sub.getName(), destFolder, state.overwriteMode);
+          state.folders++;
+          task.subsToken = subs.getContinuationToken();
+          state.stack.push({
+            srcId: sub.getId(),
+            destId: childDest.getId(),
+            phase: 'files',
+            filesToken: null,
+            subsToken: null
+          });
+          setProgress({
+            done: state.files,
+            total: 0,
+            current: '📁 ' + sub.getName(),
+            bytesCopied: state.bytesCopied || 0,
+            errors: state.errors,
+            status: 'running'
+          });
+          break;
+        } catch(e) {
+          rememberCopyError(state, '❌ 📁 ' + sub.getName() + ': ' + e.message);
+        }
+      }
+
+      if (state.stack[state.stack.length - 1] !== task) continue;
+      task.subsToken = null;
+      state.stack.pop();
     }
   }
 
-  return { name: name, files: totalFiles, folders: totalFolders, errors: errors };
+  state.status = 'done';
+  clearCopyState();
+  return {
+    name: state.name,
+    files: state.files,
+    folders: state.folders,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors,
+    status: 'done'
+  };
 }
 
 // =====================================================================

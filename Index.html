@@ -154,6 +154,18 @@
         .status.success{background:var(--accent-glow);border:1px solid rgba(52,211,153,0.3);color:var(--accent)}
         .status.error{background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);color:var(--danger)}
 
+        /* Background copy manager */
+        .background-card{padding:12px}
+        .bg-status{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font-size:12px;color:var(--muted);line-height:1.5}
+        .bg-status strong{color:var(--text);font-weight:600}
+        .bg-status .ok{color:var(--accent)}
+        .bg-status .warn{color:var(--warn)}
+        .bg-status .bad{color:var(--danger)}
+        .bg-meta{display:grid;grid-template-columns:1fr;gap:4px;margin-top:6px}
+        .bg-actions{display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px}
+        .bg-actions .btn-sm{width:100%}
+        @media(min-width:440px){.bg-actions{grid-template-columns:1fr 1fr 1fr}}
+
         /* Spinner */
         .spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(56,189,248,0.3);border-top-color:var(--accent2);border-radius:50%;animation:spin .7s linear infinite}
         @keyframes spin{to{transform:rotate(360deg)}}
@@ -360,6 +372,16 @@
 
             <button class="btn btn-primary" id="copyBtn" onclick="startCopy()">⬇ Bắt đầu Copy</button>
 
+            <div class="card background-card">
+                <div class="card-title">☁ Phiên chạy nền</div>
+                <div class="bg-status" id="backgroundStatus">Đang kiểm tra...</div>
+                <div class="bg-actions">
+                    <button class="btn-sm ghost" id="bgRefreshBtn" onclick="refreshBackgroundStatus()">Làm mới</button>
+                    <button class="btn-sm green" id="bgResumeBtn" onclick="resumeBackgroundCopy()" disabled>Chạy tiếp ngay</button>
+                    <button class="btn-sm ghost" id="bgCancelBtn" onclick="cancelBackgroundCopy()" style="border-color:var(--danger);color:var(--danger)" disabled>Hủy phiên nền</button>
+                </div>
+            </div>
+
             <div class="progress-wrap" id="progressWrap">
                 <div class="progress-header">
                     <div class="progress-title" id="progressTitle">Đang copy...</div>
@@ -462,8 +484,9 @@
         if (info.storage) {
             renderStorageMini(info.storage);
         }
-    }).getAppInfo();
-    loadFolders('root');
+	    }).getAppInfo();
+	    loadFolders('root');
+	    refreshBackgroundStatus();
 
     /* ============ TABS ============ */
     function switchTab(tab) {
@@ -582,63 +605,212 @@
         const btn = document.getElementById('copyBtn');
         btn.disabled = true;
         btn.innerHTML = '<span class="spin"></span> Đang copy...';
-        document.getElementById('status').className = 'status';
-        document.getElementById('errorLog').classList.remove('show');
+	        document.getElementById('status').className = 'status';
+	        document.getElementById('errorLog').classList.remove('show');
+	        document.getElementById('progressBar').classList.remove('done');
 
-        showProgress(0, 1, 'Đang khởi động...', '', []);
-        startPolling();
+	        showProgress(0, 1, 'Đang khởi động...', '', [], 0);
+	        startPolling();
+	        runCopyBatch('copyItem', [url, dest, mode]);
+	        refreshBackgroundStatus();
+	    }
 
-        google.script.run
+    function runCopyBatch(method, args) {
+        const runner = google.script.run
             .withSuccessHandler(res => {
-                stopPolling();
-                copyRunning = false;
-                btn.disabled = false;
-                btn.innerHTML = '⬇ Bắt đầu Copy';
-                showProgress(res.files, res.files || 1, 'Hoàn thành ✅', res.files + ' file đã copy', res.errors || []);
-                document.getElementById('progressTitle').textContent = '✅ Hoàn thành';
-                document.getElementById('progressBar').classList.add('done');
-                const errCount = (res.errors || []).length;
-                showFinalStatus(
-                    '✅ <strong>' + escHtml(res.name) + '</strong> — ' +
-                    res.files + ' file, ' + res.folders + ' folder.' +
-                    (errCount ? ' <span style="color:var(--warn)">⚠ ' + errCount + ' lỗi</span>' : ''),
-                    'success'
-                );
+	                if (res && res.status === 'running') {
+	                    const copiedText = fmtBytes(res.bytesCopied || 0) + ' đã copy';
+	                    showProgress(res.files, 0, 'Đang copy tiếp theo lô...', res.files + ' file · ' + copiedText, res.errors || [], res.bytesCopied || 0);
+	                    showFinalStatus('⏳ Đã kích hoạt copy nền. Bạn có thể tắt tab hoặc tắt máy; Apps Script sẽ tự chạy tiếp theo từng lô.', 'success');
+	                    refreshBackgroundStatus();
+	                    return;
+	                }
+	                finishCopyUi(res);
             })
             .withFailureHandler(e => {
                 stopPolling();
                 copyRunning = false;
+                const btn = document.getElementById('copyBtn');
                 btn.disabled = false;
                 btn.innerHTML = '⬇ Bắt đầu Copy';
                 document.getElementById('progressWrap').classList.remove('show');
                 showFinalStatus('❌ Lỗi: ' + e.message, 'error');
-            })
-            .copyItem(url, dest, mode);
+            });
+        if (method === 'continueCopy') {
+            runner.continueCopy();
+        } else {
+            runner.copyItem(args[0], args[1], args[2]);
+        }
     }
 
-    /* ============ PROGRESS POLLING (STABLE) ============ */
-    function startPolling() {
-        pollTimer = setInterval(() => {
+	    function finishCopyUi(res) {
+	        stopPolling();
+	        copyRunning = false;
+	        const btn = document.getElementById('copyBtn');
+	        btn.disabled = false;
+	        btn.innerHTML = '⬇ Bắt đầu Copy';
+	        const cancelled = res && res.status === 'cancelled';
+	        if (cancelled) {
+	            showProgress(res.files || 0, 0, 'Đã hủy', (res.files || 0) + ' file · ' + fmtBytes(res.bytesCopied || 0) + ' đã copy', res.errors || [], res.bytesCopied || 0);
+	            document.getElementById('progressTitle').textContent = 'Đã hủy';
+	            showFinalStatus('Đã hủy phiên copy nền. Các file đã copy trước đó vẫn nằm trong thư mục đích.', 'error');
+	            refreshBackgroundStatus();
+	            return;
+	        }
+	        showProgress(res.files, res.files || 1, 'Hoàn thành ✅', res.files + ' file · ' + fmtBytes(res.bytesCopied || 0) + ' đã copy', res.errors || [], res.bytesCopied || 0);
+	        document.getElementById('progressTitle').textContent = '✅ Hoàn thành';
+	        document.getElementById('progressBar').classList.add('done');
+        const errCount = (res.errors || []).length;
+        showFinalStatus(
+            '✅ <strong>' + escHtml(res.name) + '</strong> — ' +
+            res.files + ' file, ' + res.folders + ' folder.' +
+            (errCount ? ' <span style="color:var(--warn)">⚠ ' + errCount + ' lỗi gần nhất</span>' : ''),
+	            'success'
+	        );
+	        refreshBackgroundStatus();
+	    }
+
+	    function refreshBackgroundStatus() {
+	        const el = document.getElementById('backgroundStatus');
+	        if (!el) return;
+	        el.innerHTML = '<span class="spin"></span> Đang kiểm tra phiên nền...';
+	        google.script.run
+	            .withSuccessHandler(renderBackgroundStatus)
+	            .withFailureHandler(e => {
+	                el.innerHTML = '<span class="bad">Không thể đọc trạng thái:</span> ' + escHtml(e.message);
+	                setBackgroundButtons(false, false);
+	            })
+	            .getCopyStatus();
+	    }
+
+	    function renderBackgroundStatus(status) {
+	        const el = document.getElementById('backgroundStatus');
+	        if (!status || status.status === 'idle') {
+	            el.innerHTML = '<strong>Không có phiên nền đang chạy.</strong>';
+	            setBackgroundButtons(false, false);
+	            return;
+	        }
+
+	        const labelMap = {
+	            running: '<span class="ok">Đang chạy</span>',
+	            scheduled: '<span class="ok">Đã hẹn chạy</span>',
+	            done: '<span class="ok">Hoàn thành</span>',
+	            cancelled: '<span class="warn">Đã hủy</span>',
+	            error: '<span class="bad">Có lỗi</span>'
+	        };
+	        const triggerText = status.triggerCount
+	            ? status.triggerCount + ' trigger · ' + (status.nextTriggerAt ? 'dự kiến ' + fmtTime(status.nextTriggerAt) : 'đã hẹn')
+	            : 'Chưa có trigger chờ';
+	        const current = status.current ? '<div>Việc hiện tại: <strong>' + escHtml(status.current) + '</strong></div>' : '';
+	        const name = status.name ? '<div>Nguồn: <strong>' + escHtml(status.name) + '</strong></div>' : '';
+	        const updated = status.updatedAt ? '<div>Cập nhật: <strong>' + fmtTime(status.updatedAt) + '</strong></div>' : '';
+	        const errors = status.errors && status.errors.length
+	            ? '<div class="bad">Lỗi gần nhất: ' + status.errors.length + '</div>'
+	            : '';
+
+	        el.innerHTML =
+	            '<div>Trạng thái: <strong>' + (labelMap[status.status] || escHtml(status.status)) + '</strong></div>' +
+	            '<div class="bg-meta">' +
+	                name +
+	                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
+	                '<div>Trigger nền: <strong>' + escHtml(triggerText) + '</strong></div>' +
+	                current +
+	                updated +
+	                errors +
+	            '</div>';
+	        setBackgroundButtons(status.hasState && status.status === 'running', status.running || status.hasState);
+	    }
+
+	    function setBackgroundButtons(canResume, canCancel) {
+	        document.getElementById('bgResumeBtn').disabled = !canResume;
+	        document.getElementById('bgCancelBtn').disabled = !canCancel;
+	    }
+
+	    function resumeBackgroundCopy() {
+	        setBackgroundButtons(false, true);
+	        document.getElementById('backgroundStatus').innerHTML = '<span class="spin"></span> Đang chạy tiếp phiên nền...';
+	        google.script.run
+	            .withSuccessHandler(status => {
+	                renderBackgroundStatus(status);
+	                if (status && status.running) startPolling();
+	            })
+	            .withFailureHandler(e => {
+	                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
+	                refreshBackgroundStatus();
+	            })
+	            .resumeCopyNow();
+	    }
+
+	    function cancelBackgroundCopy() {
+	        setBackgroundButtons(false, false);
+	        document.getElementById('backgroundStatus').innerHTML = '<span class="spin"></span> Đang hủy phiên nền...';
+	        google.script.run
+	            .withSuccessHandler(status => {
+	                stopPolling();
+	                copyRunning = false;
+	                const btn = document.getElementById('copyBtn');
+	                btn.disabled = false;
+	                btn.innerHTML = '⬇ Bắt đầu Copy';
+	                renderBackgroundStatus(status);
+	                showFinalStatus('Đã hủy phiên copy nền. Nếu một batch đang chạy, nó sẽ dừng ở lần kiểm tra kế tiếp.', 'error');
+	            })
+	            .withFailureHandler(e => {
+	                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
+	                refreshBackgroundStatus();
+	            })
+	            .cancelCopy();
+	    }
+
+	    /* ============ PROGRESS POLLING (STABLE) ============ */
+	    function startPolling() {
+	        if (pollTimer) return;
+	        pollTimer = setInterval(() => {
             google.script.run.withSuccessHandler(p => {
                 if (!p) return;
                 // Chỉ cập nhật nếu timestamp mới hơn → tránh hiển thị data cũ
                 if (p._ts && p._ts <= lastProgressTs) return;
                 lastProgressTs = p._ts || 0;
-                showProgress(p.done, p.total, p.current, p.done + ' / ' + p.total + ' file', p.errors || []);
-                if (p.status === 'done' || p.status === 'error') stopPolling();
-            }).getProgress();
-        }, 1500);
-    }
+                const copiedText = fmtBytes(p.bytesCopied || 0) + ' đã copy';
+                const counts = p.total > 0 ? p.done + ' / ' + p.total + ' file · ' + copiedText : p.done + ' file · ' + copiedText;
+                showProgress(p.done, p.total, p.current, counts, p.errors || [], p.bytesCopied || 0);
+	                if (p.status === 'done') {
+	                    finishCopyUi({
+                        name: p.name || 'Hoàn thành',
+                        files: p.done || 0,
+                        folders: p.folders || 0,
+                        bytesCopied: p.bytesCopied || 0,
+                        errors: p.errors || []
+                    });
+	                    return;
+	                }
+	                if (p.status === 'cancelled') {
+	                    finishCopyUi({
+	                        name: p.name || 'Đã hủy',
+	                        files: p.done || 0,
+	                        folders: p.folders || 0,
+	                        bytesCopied: p.bytesCopied || 0,
+	                        errors: p.errors || [],
+	                        status: 'cancelled'
+	                    });
+	                    return;
+	                }
+	                if (p.status === 'error') {
+	                    stopPolling();
+	                    refreshBackgroundStatus();
+	                }
+	            }).getProgress();
+	        }, 1500);
+	    }
     function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
-    function showProgress(done, total, current, counts, errors) {
+    function showProgress(done, total, current, counts, errors, bytesCopied) {
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         const wrap = document.getElementById('progressWrap');
         wrap.classList.add('show');
-        document.getElementById('progressPct').textContent = pct + '%';
-        document.getElementById('progressBar').style.width = pct + '%';
+        document.getElementById('progressPct').textContent = total > 0 ? pct + '%' : '...';
+        document.getElementById('progressBar').style.width = total > 0 ? pct + '%' : '18%';
         document.getElementById('progressCurrent').textContent = '📄 ' + (current || '');
-        document.getElementById('progressCounts').textContent = counts || '';
+        document.getElementById('progressCounts').textContent = counts || (fmtBytes(bytesCopied || 0) + ' đã copy');
         if (errors && errors.length) {
             document.getElementById('errorLog').classList.add('show');
             document.getElementById('errorLogItems').innerHTML =
@@ -877,23 +1049,31 @@
                     if (b >= 1024) return (b/1024).toFixed(0)+' KB';
                     return b+' B';
                 };
-                const estTxt = fmt(r.estimated);
+                const estTxt = (r.partial ? '≥ ' : '') + fmt(r.estimated);
                 const freeTxt = r.unlimited ? '∞ (Unlimited)' : fmt(r.free);
                 const usedPct = r.total > 0 ? Math.round((r.used/r.total)*100) : 0;
                 const afterPct = r.total > 0 ? Math.min(100, Math.round(((r.used+r.estimated)/r.total)*100)) : 0;
                 const barColor = afterPct > 90 ? 'var(--danger)' : afterPct > 70 ? 'var(--warn)' : 'var(--accent)';
+                const afterLabel = r.partial ? 'Sau copy: ít nhất ~' + afterPct + '%' : 'Sau copy: ~' + afterPct + '%';
                 const barHtml = r.unlimited ? '' : `
                     <div class="space-bar-wrap">
                       <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px">
                         <span>Đã dùng: ${fmt(r.used)} (${usedPct}%)</span>
-                        <span>Sau copy: ~${afterPct}%</span>
+                        <span>${afterLabel}</span>
                       </div>
                       <div class="space-bar-bg"><div class="space-bar-used" style="width:${afterPct}%;background:${barColor}"></div></div>
                     </div>`;
+                const partialHtml = r.partial
+                    ? '<div style="margin-top:6px;color:var(--warn)">⚠ Folder lớn: chỉ quét ' + r.scannedFiles + ' file / ' + r.scannedFolders + ' folder đầu tiên để tránh quá tải. Dung lượng thật có thể lớn hơn.</div>'
+                    : '';
+                if (r.partial) {
+                    showSpaceResult('warn','⚠ Ước tính một phần — Cần ít nhất: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
+                    return;
+                }
                 if (r.enough) {
-                    showSpaceResult('ok','✅ Đủ — Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml);
+                    showSpaceResult('ok','✅ Đủ — Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
                 } else {
-                    showSpaceResult('warn','⚠ Thiếu <strong>'+fmt(r.estimated-r.free)+'</strong>. Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml);
+                    showSpaceResult('warn','⚠ Thiếu <strong>'+fmt(r.estimated-r.free)+'</strong>. Cần: <strong>'+estTxt+'</strong> | Trống: <strong>'+freeTxt+'</strong>'+barHtml+partialHtml);
                 }
             })
             .withFailureHandler(e => {
@@ -912,13 +1092,19 @@
     /* ============ UTILS ============ */
     function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-    function fmtBytes(b) {
-        if (b < 0) return '∞';
-        if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+	    function fmtBytes(b) {
+	        if (b < 0) return '∞';
+	        if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
         if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
         if (b >= 1024) return (b / 1024).toFixed(0) + ' KB';
-        return b + ' B';
-    }
+	        return b + ' B';
+	    }
+
+	    function fmtTime(ts) {
+	        const d = new Date(ts);
+	        if (isNaN(d.getTime())) return '—';
+	        return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+	    }
 
     /* ============ STORAGE MINI BAR ============ */
     function renderStorageMini(storage) {
