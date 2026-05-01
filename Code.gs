@@ -1,13 +1,20 @@
 // ============================================================
-//  DRIVE COPIER - Code.gs  (v3.9 — 2026-05-01)
+//  DRIVE COPIER - Code.gs  (v4.0 — 2026-05-01)
 //  Email + storage header · Drive info · folder sizes
 // ============================================================
 
-const APP_VERSION  = '3.9';
+const APP_VERSION  = '4.0';
 const APP_UPDATED  = '2026-05-01';
 const HISTORY_KEY  = 'copy_history';
 const PROGRESS_KEY = 'copy_progress';
 const COPY_STATE_KEY = 'copy_state';
+const COPY_SESSION_REGISTRY_KEY = 'copy_sessions';
+const COPY_SESSION_STATE_PREFIX = 'copy_state_';
+const COPY_SESSION_PROGRESS_PREFIX = 'copy_progress_';
+const COPY_MAX_PARALLEL_SESSIONS = 3;
+const COPY_SESSION_HISTORY_LIMIT = 20;
+const COPY_START_WAIT = 'wait';
+const COPY_START_PARALLEL = 'parallel';
 const COPY_BATCH_MS = 180000;
 const COPY_ERROR_LIMIT = 30;
 const COPY_RETRY_LIMIT = 3;
@@ -256,41 +263,135 @@ function detectType(id) {
 }
 
 // =====================================================================
-//  PROGRESS HELPERS  (UI polls getProgress() every 1.5s)
+//  SESSION + PROGRESS HELPERS
 // =====================================================================
 
-function setProgress(data) {
-  // Thêm timestamp để frontend phân biệt update mới vs cũ
+function copyStateKey(sessionId) {
+  return COPY_SESSION_STATE_PREFIX + sessionId;
+}
+
+function copyProgressKey(sessionId) {
+  return COPY_SESSION_PROGRESS_PREFIX + sessionId;
+}
+
+function setProgress(data, sessionId) {
+  sessionId = normalizeCopySessionId(sessionId || data.sessionId, false);
   data._ts = Date.now();
+  if (sessionId) {
+    data.sessionId = sessionId;
+    registerCopySession(sessionId);
+    PropertiesService.getUserProperties().setProperty(copyProgressKey(sessionId), JSON.stringify(data));
+    return;
+  }
   PropertiesService.getUserProperties().setProperty(PROGRESS_KEY, JSON.stringify(data));
 }
 
-function getProgress() {
+function getProgress(sessionId) {
+  const store = PropertiesService.getUserProperties();
+  sessionId = normalizeCopySessionId(sessionId, false);
   try {
-    return JSON.parse(
-      PropertiesService.getUserProperties().getProperty(PROGRESS_KEY) || 'null'
-    );
-  } catch(e) { return null; }
+    if (sessionId) {
+      return JSON.parse(store.getProperty(copyProgressKey(sessionId)) || 'null');
+    }
+    const selected = chooseCopySessionForStatus(getCopySessions());
+    if (selected && selected.sessionId) {
+      return JSON.parse(store.getProperty(copyProgressKey(selected.sessionId)) || 'null');
+    }
+    return JSON.parse(store.getProperty(PROGRESS_KEY) || 'null');
+  } catch(e) {
+    return null;
+  }
 }
 
-function clearProgress() {
-  PropertiesService.getUserProperties().deleteProperty(PROGRESS_KEY);
+function clearProgress(sessionId) {
+  const store = PropertiesService.getUserProperties();
+  sessionId = normalizeCopySessionId(sessionId, false);
+  if (sessionId) {
+    store.deleteProperty(copyProgressKey(sessionId));
+    return;
+  }
+  store.deleteProperty(PROGRESS_KEY);
 }
 
 function saveCopyState(state) {
-  PropertiesService.getUserProperties().setProperty(COPY_STATE_KEY, JSON.stringify(state));
+  if (!state.sessionId) state.sessionId = generateCopySessionId();
+  state.updatedAt = state.updatedAt || Date.now();
+  registerCopySession(state.sessionId);
+  PropertiesService.getUserProperties().setProperty(copyStateKey(state.sessionId), JSON.stringify(state));
 }
 
-function getCopyState() {
+function getCopyState(sessionId) {
+  const store = PropertiesService.getUserProperties();
+  sessionId = normalizeCopySessionId(sessionId, false);
   try {
-    return JSON.parse(
-      PropertiesService.getUserProperties().getProperty(COPY_STATE_KEY) || 'null'
-    );
-  } catch(e) { return null; }
+    if (sessionId) {
+      return JSON.parse(store.getProperty(copyStateKey(sessionId)) || 'null');
+    }
+    return JSON.parse(store.getProperty(COPY_STATE_KEY) || 'null');
+  } catch(e) {
+    return null;
+  }
 }
 
-function clearCopyState() {
-  PropertiesService.getUserProperties().deleteProperty(COPY_STATE_KEY);
+function clearCopyState(sessionId) {
+  const store = PropertiesService.getUserProperties();
+  sessionId = normalizeCopySessionId(sessionId, false);
+  if (sessionId) {
+    store.deleteProperty(copyStateKey(sessionId));
+    return;
+  }
+  store.deleteProperty(COPY_STATE_KEY);
+}
+
+function getCopySessionIds() {
+  try {
+    const ids = JSON.parse(PropertiesService.getUserProperties().getProperty(COPY_SESSION_REGISTRY_KEY) || '[]');
+    return Array.isArray(ids) ? ids.filter(Boolean) : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function saveCopySessionIds(ids) {
+  const unique = [];
+  ids.forEach(function(id) {
+    if (id && unique.indexOf(id) === -1) unique.push(id);
+  });
+  PropertiesService.getUserProperties().setProperty(COPY_SESSION_REGISTRY_KEY, JSON.stringify(unique));
+}
+
+function registerCopySession(sessionId) {
+  if (!sessionId) return;
+  let ids = getCopySessionIds();
+  if (ids.indexOf(sessionId) === -1) ids.push(sessionId);
+  ids = pruneCopySessionIds(ids);
+  saveCopySessionIds(ids);
+}
+
+function pruneCopySessionIds(ids) {
+  if (ids.length <= COPY_SESSION_HISTORY_LIMIT) return ids;
+  const keep = ids.slice();
+  const store = PropertiesService.getUserProperties();
+  while (keep.length > COPY_SESSION_HISTORY_LIMIT) {
+    const candidate = keep[0];
+    const state = getCopyState(candidate);
+    const progress = getProgress(candidate);
+    const status = (state && state.status) || (progress && progress.status) || '';
+    if (status === 'running' || status === 'queued') {
+      keep.push(keep.shift());
+      if (keep.every(function(id) {
+        const s = getCopyState(id);
+        const p = getProgress(id);
+        const st = (s && s.status) || (p && p.status) || '';
+        return st === 'running' || st === 'queued';
+      })) break;
+      continue;
+    }
+    store.deleteProperty(copyStateKey(candidate));
+    store.deleteProperty(copyProgressKey(candidate));
+    keep.shift();
+  }
+  return keep.slice(Math.max(0, keep.length - COPY_SESSION_HISTORY_LIMIT));
 }
 
 // =====================================================================
@@ -467,13 +568,9 @@ function checkSpace(sourceUrl) {
 //  MAIN COPY  — overwriteMode: 'skip' | 'overwrite' | 'rename'
 // =====================================================================
 
-function copyItem(sourceUrl, destFolderId, overwriteMode) {
+function copyItem(sourceUrl, destFolderId, overwriteMode, startMode, requestedSessionId) {
   overwriteMode = overwriteMode || 'rename';
-
-  // Xóa progress/trạng thái cũ trước khi bắt đầu phiên copy mới.
-  clearProgress();
-  clearCopyState();
-  clearCopyTriggers();
+  startMode = normalizeCopyStartMode(startMode);
 
   const parsed = parseId(sourceUrl);
   if (!parsed) throw new Error('Không nhận ra định dạng link/ID. Vui lòng kiểm tra lại.');
@@ -485,178 +582,176 @@ function copyItem(sourceUrl, destFolderId, overwriteMode) {
   const destFolder = destFolderId === 'root'
     ? DriveApp.getRootFolder()
     : DriveApp.getFolderById(destFolderId);
+  const sourceName = type === 'folder'
+    ? DriveApp.getFolderById(parsed.id).getName()
+    : DriveApp.getFileById(parsed.id).getName();
+  const sessionId = normalizeCopySessionId(requestedSessionId, true);
+  const state = createCopySessionState({
+    sessionId: sessionId,
+    sourceUrl: sourceUrl,
+    sourceId: parsed.id,
+    destFolderId: destFolderId || 'root',
+    destName: destFolder.getName(),
+    type: type,
+    name: sourceName,
+    overwriteMode: overwriteMode,
+    startMode: startMode
+  });
 
-  let result;
+  const lock = LockService.getUserLock();
+  lock.waitLock(5000);
   try {
-    if (type === 'folder') {
-      const src = DriveApp.getFolderById(parsed.id);
-      const rootDest = prepareDestinationFolder(src.getName(), destFolder, overwriteMode);
-      const state = {
-        status: 'running',
-        source: sourceUrl,
-        destName: destFolder.getName(),
-        type: type,
-        name: src.getName(),
-        overwriteMode: overwriteMode,
-        startedAt: Date.now(),
-        updatedAt: Date.now(),
-        nextTriggerAt: null,
-        lastCurrent: 'Đang chuẩn bị copy theo lô...',
-        files: 0,
-        bytesCopied: 0,
-        folders: 1,
-        errors: [],
-        stack: [{
-          srcId: src.getId(),
-          destId: rootDest.getId(),
-          phase: 'files',
-          filesToken: null,
-          subsToken: null
-        }]
-      };
+    const activeSessions = getActiveCopySessions();
+    const shouldQueue = startMode === COPY_START_WAIT && activeSessions.length > 0;
+    if (shouldQueue || activeSessions.length >= COPY_MAX_PARALLEL_SESSIONS) {
+      state.status = 'queued';
+      state.queueReason = activeSessions.length >= COPY_MAX_PARALLEL_SESSIONS
+        ? 'Đã đạt tối đa ' + COPY_MAX_PARALLEL_SESSIONS + ' phiên chạy song song.'
+        : 'Bạn chọn chờ phiên đang chạy hoàn tất trước.';
+      state.lastCurrent = 'Đang chờ slot chạy nền...';
       saveCopyState(state);
       setProgress({
         done: 0,
         total: 0,
-        current: 'Đang chuẩn bị copy theo lô...',
+        current: state.lastCurrent,
+        name: state.name,
+        source: state.source,
+        destName: state.destName,
+        type: state.type,
+        folders: 0,
         bytesCopied: 0,
         errors: [],
-        status: 'running'
-      });
-      result = processCopyState(state);
-    } else {
-      const src = DriveApp.getFileById(parsed.id);
-      setProgress({ done: 0, total: 1, current: src.getName(), errors: [], status: 'running' });
-      const fileSize = src.getSize();
-      const copyStatus = copySingleFile(src, destFolder, overwriteMode);
-      const bytesCopied = copyStatus === 'skipped' ? 0 : fileSize;
-      const result = { name: src.getName(), files: 1, folders: 0, bytesCopied: bytesCopied, errors: [], status: 'done' };
-      finishCopy(result, sourceUrl, destFolder.getName(), type);
-      return result;
+        status: 'queued',
+        queueReason: state.queueReason
+      }, sessionId);
+      return stateToQueuedResult(state);
     }
-  } catch(e) {
-    const failedState = getCopyState();
-    if (failedState) {
-      failedState.status = 'error';
-      failedState.updatedAt = Date.now();
-      failedState.lastCurrent = e.message;
-      saveCopyState(failedState);
-    }
-    clearCopyTriggers();
-    setProgress({ done: 0, total: 0, current: '', errors: [e.message], status: 'error' });
-    throw e;
-  }
-
-  if (result.status === 'done') {
-    finishCopy(result, sourceUrl, destFolder.getName(), type);
-  }
-
-  return result;
-}
-
-function continueCopy() {
-  const lock = LockService.getUserLock();
-  if (!lock.tryLock(1000)) {
-    const state = getCopyState();
-    return state ? stateToRunningResult(state) : {
-      name: '',
-      files: 0,
-      folders: 0,
-      bytesCopied: 0,
-      errors: [],
-      status: 'running'
-    };
-  }
-
-  const state = getCopyState();
-  try {
-    if (!state || state.status !== 'running') {
-      throw new Error('Không có phiên copy đang chạy để tiếp tục.');
-    }
-    const result = processCopyState(state);
-    if (result.status === 'done') {
-      finishCopy(result, state.source, state.destName, state.type);
-    }
-    return result;
+    state.status = 'starting';
+    state.lastCurrent = 'Đang giữ slot chạy song song...';
+    saveCopyState(state);
   } finally {
     lock.releaseLock();
   }
+
+  try {
+    activateCopySession(state, false);
+    const result = continueCopy(sessionId);
+    return result;
+  } catch(e) {
+    const progress = getProgress(sessionId);
+    if (!progress || progress.status !== 'error') {
+      markCopySessionError(sessionId, e);
+    }
+    throw e;
+  }
 }
 
-function continueCopyByTrigger() {
+function continueCopy(sessionId) {
+  sessionId = normalizeCopySessionId(sessionId, false) || findNextRunnableSessionId();
+  if (!sessionId) throw new Error('Không có phiên copy đang chạy để tiếp tục.');
+
+  let lease = acquireCopySessionLease(sessionId);
+  if (!lease || lease.busy) {
+    const busyState = getCopyState(sessionId);
+    return busyState ? stateToRunningResult(busyState) : getCopyStatus(sessionId);
+  }
+
+  let done = false;
   try {
-    const state = getCopyState();
-    if (!state || state.status !== 'running') {
-      clearCopyTriggers();
+    const state = lease.state;
+    clearCopyTriggers(sessionId);
+    state.triggerId = '';
+    state.nextTriggerAt = null;
+    saveCopyState(state);
+
+    const result = processCopyState(state);
+    if (result.status === 'done') {
+      done = true;
+      finishCopy(result, state);
+    }
+    return result;
+  } catch(e) {
+    markCopySessionError(sessionId, e);
+    throw e;
+  } finally {
+    if (!done) releaseCopySessionLease(sessionId, lease.leaseId);
+  }
+}
+
+function continueCopyByTrigger(e) {
+  const triggerUid = e && e.triggerUid ? String(e.triggerUid) : '';
+  const sessionId = triggerUid ? findSessionIdByTriggerUid(triggerUid) : findNextRunnableSessionId();
+  try {
+    if (!sessionId) {
+      if (triggerUid) clearCopyTriggersById(triggerUid);
+      promoteQueuedSessions();
       return;
     }
-    continueCopy();
-  } catch(e) {
-    const state = getCopyState();
-    if (state) {
-      state.status = 'error';
-      state.updatedAt = Date.now();
-      state.lastCurrent = e.message;
-      saveCopyState(state);
+    const state = getCopyState(sessionId);
+    if (!state || state.status !== 'running') {
+      clearCopyTriggers(sessionId);
+      if (triggerUid) clearCopyTriggersById(triggerUid);
+      promoteQueuedSessions();
+      return;
     }
-    clearCopyTriggers();
-    setProgress({
-      done: 0,
-      total: 0,
-      current: '',
-      errors: [e.message],
-      status: 'error'
-    });
+    continueCopy(sessionId);
+  } catch(err) {
+    if (sessionId) markCopySessionError(sessionId, err);
   }
 }
 
-function getCopyStatus() {
-  const progress = getProgress();
-  const state = getCopyState();
-  const copyTriggers = getProjectTriggerDetails().filter(function(trigger) {
-    return trigger.handler === COPY_TRIGGER_HANDLER;
-  });
-  const triggerCount = copyTriggers.length;
-  const progressStatus = progress && progress.status ? progress.status : '';
-  const stateStatus = state && state.status ? state.status : '';
-  let status = progressStatus || stateStatus || (triggerCount ? 'scheduled' : 'idle');
-
-  if (stateStatus === 'running' && !triggerCount && progressStatus === 'running') {
-    status = 'running';
-  } else if (stateStatus === 'running' && triggerCount) {
-    status = 'running';
-  } else if (stateStatus === 'error') {
-    status = 'error';
-  }
-
-  return {
-    status: status,
-    running: status === 'running' || status === 'scheduled',
-    hasState: !!state,
-    hasTrigger: triggerCount > 0,
-    triggerCount: triggerCount,
-    triggerHandler: COPY_TRIGGER_HANDLER,
-    triggerIds: copyTriggers.map(function(trigger) { return trigger.id; }),
-    source: state ? state.source : '',
-    destName: state ? state.destName : '',
-    name: (progress && progress.name) || (state && state.name) || '',
-    current: (progress && progress.current) || (state && state.lastCurrent) || '',
-    files: (progress && typeof progress.done === 'number') ? progress.done : (state ? state.files : 0),
-    folders: (progress && typeof progress.folders === 'number') ? progress.folders : (state ? state.folders : 0),
-    bytesCopied: (progress && typeof progress.bytesCopied === 'number') ? progress.bytesCopied : (state ? state.bytesCopied || 0 : 0),
-    errors: (progress && progress.errors) || (state && state.errors) || [],
-    startedAt: state ? state.startedAt || null : null,
-    updatedAt: (progress && progress._ts) || (state && state.updatedAt) || null,
-    nextTriggerAt: state ? state.nextTriggerAt || null : null
+function getCopyStatus(sessionId) {
+  const sessions = getCopySessions();
+  const selected = sessionId
+    ? buildCopySessionStatus(sessionId)
+    : chooseCopySessionForStatus(sessions);
+  const activeCount = sessions.filter(function(session) {
+    return isActiveCopyStatus(session.status);
+  }).length;
+  const queuedCount = sessions.filter(function(session) {
+    return session.status === 'queued';
+  }).length;
+  const status = selected || {
+    sessionId: '',
+    status: 'idle',
+    running: false,
+    hasState: false,
+    hasTrigger: false,
+    triggerCount: 0,
+    triggerIds: [],
+    source: '',
+    destName: '',
+    name: '',
+    current: '',
+    files: 0,
+    folders: 0,
+    bytesCopied: 0,
+    errors: [],
+    startedAt: null,
+    updatedAt: null,
+    nextTriggerAt: null
   };
+  status.sessions = sessions;
+  status.activeCount = activeCount;
+  status.queuedCount = queuedCount;
+  status.maxParallelSessions = COPY_MAX_PARALLEL_SESSIONS;
+  return status;
+}
+
+function getCopySessions() {
+  return getCopySessionIds()
+    .map(function(sessionId) { return buildCopySessionStatus(sessionId); })
+    .filter(function(session) { return !!session; });
 }
 
 function getTriggerDashboard() {
   const triggers = getProjectTriggerDetails();
+  const sessions = getCopySessions();
   const copyStatus = getCopyStatus();
   return {
     checkedAt: Date.now(),
     copyStatus: copyStatus,
+    sessions: sessions,
     triggers: triggers,
     copyTriggers: triggers.filter(function(trigger) {
       return trigger.handler === COPY_TRIGGER_HANDLER;
@@ -671,140 +766,451 @@ function getTriggerDashboard() {
     },
     appMode: {
       appsScriptSupportsParallelExecutions: true,
-      parallelCopyEnabled: false,
-      stateKey: COPY_STATE_KEY,
-      progressKey: PROGRESS_KEY,
-      reason: 'Phiên copy hiện tại dùng một copy_state duy nhất để tránh hai lượt copy ghi đè trạng thái của nhau.'
+      parallelCopyEnabled: true,
+      maxParallelSessions: COPY_MAX_PARALLEL_SESSIONS,
+      stateKey: COPY_SESSION_STATE_PREFIX + '{sessionId}',
+      progressKey: COPY_SESSION_PROGRESS_PREFIX + '{sessionId}',
+      reason: 'Mỗi phiên copy có sessionId, progress và trigger riêng; quá ' + COPY_MAX_PARALLEL_SESSIONS + ' phiên sẽ tự vào hàng chờ.'
     }
   };
 }
 
-function cancelCopy() {
-  const state = getCopyState();
-  const progress = getProgress();
-  clearCopyTriggers();
-  clearCopyState();
+function cancelCopy(sessionId) {
+  sessionId = normalizeCopySessionId(sessionId, false) || (chooseCopySessionForStatus(getCopySessions()) || {}).sessionId;
+  if (!sessionId) return getCopyStatus();
+
+  const state = getCopyState(sessionId);
+  const progress = getProgress(sessionId);
+  clearCopyTriggers(sessionId);
+  clearCopyState(sessionId);
 
   setProgress({
     done: (progress && typeof progress.done === 'number') ? progress.done : (state ? state.files : 0),
     total: 0,
     current: 'Đã hủy phiên copy nền.',
     name: (progress && progress.name) || (state && state.name) || '',
+    source: (progress && progress.source) || (state && state.source) || '',
+    destName: (progress && progress.destName) || (state && state.destName) || '',
+    type: (progress && progress.type) || (state && state.type) || '',
     folders: (progress && typeof progress.folders === 'number') ? progress.folders : (state ? state.folders : 0),
     bytesCopied: (progress && typeof progress.bytesCopied === 'number') ? progress.bytesCopied : (state ? state.bytesCopied || 0 : 0),
     errors: (progress && progress.errors) || (state && state.errors) || [],
     status: 'cancelled'
-  });
+  }, sessionId);
 
-  return getCopyStatus();
+  promoteQueuedSessions();
+  return getCopyStatus(sessionId);
 }
 
-function resumeCopyNow() {
-  const state = getCopyState();
-  if (!state || state.status !== 'running') {
-    return getCopyStatus();
+function resumeCopyNow(sessionId) {
+  sessionId = normalizeCopySessionId(sessionId, false) || findNextRunnableSessionId();
+  if (!sessionId) return getCopyStatus();
+
+  const state = getCopyState(sessionId);
+  if (state && state.status === 'queued') {
+    if (getActiveCopySessions().length >= COPY_MAX_PARALLEL_SESSIONS) {
+      return getCopyStatus(sessionId);
+    }
+    activateCopySession(state, false);
+  } else if (!state || state.status !== 'running') {
+    return getCopyStatus(sessionId);
   }
-  continueCopy();
-  return getCopyStatus();
+  continueCopy(sessionId);
+  return getCopyStatus(sessionId);
 }
 
-function finishCopy(result, sourceUrl, destName, type) {
+function finishCopy(result, state) {
+  const sessionId = result.sessionId || (state && state.sessionId) || '';
   setProgress({
+    sessionId: sessionId,
     done: result.files,
     total: result.files || 1,
     current: 'Hoàn thành',
     name: result.name,
+    source: state ? state.source : '',
+    destName: state ? state.destName : '',
+    type: state ? state.type : '',
     folders: result.folders || 0,
     bytesCopied: result.bytesCopied || 0,
-    errors: result.errors,
+    errors: result.errors || [],
     status: 'done'
-  });
+  }, sessionId);
 
   saveHistory({
     date: new Date().toLocaleString('vi-VN'),
-    source: sourceUrl,
-    dest: destName,
-    type: type,
+    source: state ? state.source : '',
+    dest: state ? state.destName : '',
+    type: state ? state.type : '',
     name: result.name,
     files: result.files,
     folders: result.folders,
     bytesCopied: result.bytesCopied || 0,
-    errors: result.errors.length
+    errors: (result.errors || []).length
   });
-  clearCopyTriggers();
-  clearCopyState();
+  clearCopyTriggers(sessionId);
+  clearCopyState(sessionId);
+  promoteQueuedSessions();
 }
 
 function stateToRunningResult(state) {
-  return {
-    name: state.name,
-    files: state.files,
-    folders: state.folders,
-    bytesCopied: state.bytesCopied || 0,
-    errors: state.errors || [],
-    status: 'running'
-  };
+  return stateToResult(state, 'running');
+}
+
+function stateToQueuedResult(state) {
+  return stateToResult(state, 'queued');
 }
 
 function stateToCancelledResult(state) {
   state.status = 'cancelled';
+  return stateToResult(state, 'cancelled');
+}
+
+function stateToResult(state, status) {
   return {
+    sessionId: state.sessionId,
     name: state.name,
-    files: state.files,
-    folders: state.folders,
+    files: state.files || 0,
+    folders: state.folders || 0,
     bytesCopied: state.bytesCopied || 0,
     errors: state.errors || [],
-    status: 'cancelled'
+    status: status,
+    queueReason: state.queueReason || '',
+    nextTriggerAt: state.nextTriggerAt || null
   };
 }
 
+function createCopySessionState(input) {
+  const now = Date.now();
+  return {
+    sessionId: input.sessionId,
+    status: 'running',
+    source: input.sourceUrl,
+    sourceId: input.sourceId,
+    destFolderId: input.destFolderId,
+    destName: input.destName,
+    type: input.type,
+    name: input.name,
+    overwriteMode: input.overwriteMode,
+    startMode: input.startMode,
+    createdAt: now,
+    startedAt: null,
+    updatedAt: now,
+    nextTriggerAt: null,
+    triggerId: '',
+    leaseId: '',
+    leaseUntil: 0,
+    lastCurrent: 'Đang chuẩn bị copy theo lô...',
+    queueReason: '',
+    files: 0,
+    bytesCopied: 0,
+    folders: 0,
+    errors: [],
+    stack: []
+  };
+}
+
+function activateCopySession(state, scheduleOnly) {
+  state.status = 'running';
+  state.startedAt = state.startedAt || Date.now();
+  state.updatedAt = Date.now();
+  state.queueReason = '';
+  state.lastCurrent = scheduleOnly ? 'Đã có slot, đang chờ trigger chạy...' : 'Đang chuẩn bị copy theo lô...';
+
+  if (state.type === 'folder' && (!state.stack || !state.stack.length)) {
+    const src = DriveApp.getFolderById(state.sourceId);
+    const destFolder = state.destFolderId === 'root'
+      ? DriveApp.getRootFolder()
+      : DriveApp.getFolderById(state.destFolderId);
+    const rootDest = prepareDestinationFolder(src.getName(), destFolder, state.overwriteMode);
+    state.folders = 1;
+    state.stack = [{
+      srcId: src.getId(),
+      destId: rootDest.getId(),
+      phase: 'files',
+      filesToken: null,
+      subsToken: null
+    }];
+  }
+
+  if (scheduleOnly) {
+    const scheduled = scheduleCopyTrigger(state.sessionId);
+    state.triggerId = scheduled.triggerId;
+    state.nextTriggerAt = scheduled.nextTriggerAt;
+  }
+
+  saveCopyState(state);
+  setProgress({
+    done: state.files || 0,
+    total: state.type === 'file' ? 1 : 0,
+    current: state.lastCurrent,
+    name: state.name,
+    source: state.source,
+    destName: state.destName,
+    type: state.type,
+    folders: state.folders || 0,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors || [],
+    status: 'running',
+    nextTriggerAt: state.nextTriggerAt || null
+  }, state.sessionId);
+  return state;
+}
+
+function promoteQueuedSessions() {
+  let activeSessions = getActiveCopySessions();
+  const queuedSessions = getQueuedCopySessions();
+  queuedSessions.forEach(function(state) {
+    if (activeSessions.length >= COPY_MAX_PARALLEL_SESSIONS) return;
+    try {
+      const activated = activateCopySession(state, true);
+      activeSessions.push(activated);
+    } catch(e) {
+      markCopySessionError(state.sessionId, e);
+    }
+  });
+}
+
+function getActiveCopySessions() {
+  return getCopySessionIds()
+    .map(function(sessionId) { return getCopyState(sessionId); })
+    .filter(function(state) { return state && isActiveCopyStatus(state.status); });
+}
+
+function getQueuedCopySessions() {
+  return getCopySessionIds()
+    .map(function(sessionId) { return getCopyState(sessionId); })
+    .filter(function(state) { return state && state.status === 'queued'; });
+}
+
+function isActiveCopyStatus(status) {
+  return status === 'running' || status === 'starting';
+}
+
+function chooseCopySessionForStatus(sessions) {
+  if (!sessions || !sessions.length) return null;
+  const running = sessions.filter(function(session) { return isActiveCopyStatus(session.status); });
+  if (running.length) return running[running.length - 1];
+  const queued = sessions.filter(function(session) { return session.status === 'queued'; });
+  if (queued.length) return queued[0];
+  return sessions[sessions.length - 1];
+}
+
+function buildCopySessionStatus(sessionId) {
+  sessionId = normalizeCopySessionId(sessionId, false);
+  if (!sessionId) return null;
+  const state = getCopyState(sessionId);
+  const progress = getProgress(sessionId);
+  if (!state && !progress) return null;
+  const triggers = getCopyTriggersForSession(sessionId);
+  const progressStatus = progress && progress.status ? progress.status : '';
+  const stateStatus = state && state.status ? state.status : '';
+  const status = progressStatus || stateStatus || (triggers.length ? 'running' : 'idle');
+  return {
+    sessionId: sessionId,
+    status: status,
+    running: isActiveCopyStatus(status),
+    hasState: !!state,
+    hasTrigger: triggers.length > 0,
+    triggerCount: triggers.length,
+    triggerHandler: COPY_TRIGGER_HANDLER,
+    triggerIds: triggers.map(function(trigger) { return trigger.id; }),
+    source: (progress && progress.source) || (state && state.source) || '',
+    destName: (progress && progress.destName) || (state && state.destName) || '',
+    name: (progress && progress.name) || (state && state.name) || '',
+    current: (progress && progress.current) || (state && state.lastCurrent) || '',
+    files: (progress && typeof progress.done === 'number') ? progress.done : (state ? state.files : 0),
+    folders: (progress && typeof progress.folders === 'number') ? progress.folders : (state ? state.folders : 0),
+    bytesCopied: (progress && typeof progress.bytesCopied === 'number') ? progress.bytesCopied : (state ? state.bytesCopied || 0 : 0),
+    errors: (progress && progress.errors) || (state && state.errors) || [],
+    queueReason: (progress && progress.queueReason) || (state && state.queueReason) || '',
+    createdAt: state ? state.createdAt || null : null,
+    startedAt: state ? state.startedAt || null : null,
+    updatedAt: (progress && progress._ts) || (state && state.updatedAt) || null,
+    nextTriggerAt: state ? state.nextTriggerAt || null : null
+  };
+}
+
+function markCopySessionError(sessionId, error) {
+  const message = error && error.message ? error.message : String(error || 'Lỗi không xác định');
+  const state = getCopyState(sessionId);
+  if (state) {
+    state.status = 'error';
+    state.updatedAt = Date.now();
+    state.lastCurrent = message;
+    state.errors = state.errors || [];
+    rememberCopyError(state, '❌ ' + message);
+    saveCopyState(state);
+  }
+  clearCopyTriggers(sessionId);
+  setProgress({
+    done: state ? state.files || 0 : 0,
+    total: 0,
+    current: message,
+    name: state ? state.name : '',
+    source: state ? state.source : '',
+    destName: state ? state.destName : '',
+    type: state ? state.type : '',
+    folders: state ? state.folders || 0 : 0,
+    bytesCopied: state ? state.bytesCopied || 0 : 0,
+    errors: state ? state.errors || [message] : [message],
+    status: 'error'
+  }, sessionId);
+  promoteQueuedSessions();
+}
+
+function normalizeCopyStartMode(startMode) {
+  return startMode === COPY_START_PARALLEL ? COPY_START_PARALLEL : COPY_START_WAIT;
+}
+
+function normalizeCopySessionId(sessionId, createIfMissing) {
+  sessionId = String(sessionId || '').trim();
+  if (!sessionId && createIfMissing) return generateCopySessionId();
+  if (!sessionId) return '';
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+}
+
+function generateCopySessionId() {
+  try {
+    return 's_' + Utilities.getUuid().replace(/-/g, '').slice(0, 18);
+  } catch(e) {
+    return 's_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+  }
+}
+
+function findNextRunnableSessionId() {
+  const states = getCopySessionIds()
+    .map(function(sessionId) { return getCopyState(sessionId); })
+    .filter(function(state) { return state && state.status === 'running'; });
+  if (!states.length) return '';
+  states.sort(function(a, b) {
+    return (a.nextTriggerAt || a.updatedAt || 0) - (b.nextTriggerAt || b.updatedAt || 0);
+  });
+  return states[0].sessionId;
+}
+
+function findSessionIdByTriggerUid(triggerUid) {
+  triggerUid = String(triggerUid || '');
+  if (!triggerUid) return '';
+  const states = getCopySessionIds()
+    .map(function(sessionId) { return getCopyState(sessionId); })
+    .filter(function(state) { return !!state; });
+  for (let i = 0; i < states.length; i++) {
+    if (states[i].triggerId === triggerUid) return states[i].sessionId;
+  }
+  return '';
+}
+
 function isCopyCancelled(state) {
-  const liveState = getCopyState();
+  const liveState = getCopyState(state.sessionId);
   return !liveState || liveState.status !== 'running' || liveState.startedAt !== state.startedAt;
 }
 
-function scheduleCopyTrigger() {
-  clearCopyTriggers();
+function acquireCopySessionLease(sessionId) {
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(1000)) {
+    const state = getCopyState(sessionId);
+    return state ? { busy: true, state: state } : null;
+  }
+  try {
+    const state = getCopyState(sessionId);
+    if (!state || state.status !== 'running') return null;
+    const now = Date.now();
+    if (state.leaseUntil && state.leaseUntil > now) {
+      return { busy: true, state: state };
+    }
+    const leaseId = generateCopySessionId();
+    state.leaseId = leaseId;
+    state.leaseUntil = now + COPY_BATCH_MS + 60000;
+    state.updatedAt = now;
+    saveCopyState(state);
+    return { busy: false, state: state, leaseId: leaseId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function releaseCopySessionLease(sessionId, leaseId) {
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const state = getCopyState(sessionId);
+    if (!state || state.leaseId !== leaseId) return;
+    state.leaseId = '';
+    state.leaseUntil = 0;
+    state.updatedAt = Date.now();
+    saveCopyState(state);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function scheduleCopyTrigger(sessionId) {
+  clearCopyTriggers(sessionId);
   const nextTriggerAt = Date.now() + COPY_TRIGGER_DELAY_MS;
-  ScriptApp.newTrigger(COPY_TRIGGER_HANDLER)
+  const trigger = ScriptApp.newTrigger(COPY_TRIGGER_HANDLER)
     .timeBased()
     .after(COPY_TRIGGER_DELAY_MS)
     .create();
-  return nextTriggerAt;
+  return {
+    triggerId: safeTriggerValue(function() { return trigger.getUniqueId(); }),
+    nextTriggerAt: nextTriggerAt
+  };
 }
 
-function clearCopyTriggers() {
+function clearCopyTriggers(sessionId) {
+  sessionId = normalizeCopySessionId(sessionId, false);
+  const state = sessionId ? getCopyState(sessionId) : null;
+  const triggerId = state && state.triggerId ? state.triggerId : '';
+  if (!sessionId) return;
+  if (triggerId) clearCopyTriggersById(triggerId);
+  if (state) {
+    state.triggerId = '';
+    state.nextTriggerAt = null;
+    saveCopyState(state);
+  }
+}
+
+function clearCopyTriggersById(triggerId) {
+  triggerId = String(triggerId || '');
+  if (!triggerId) return;
   const triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function(trigger) {
-    if (trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER) {
+    const id = safeTriggerValue(function() { return trigger.getUniqueId(); });
+    const handler = safeTriggerValue(function() { return trigger.getHandlerFunction(); });
+    if (handler === COPY_TRIGGER_HANDLER && id === triggerId) {
       ScriptApp.deleteTrigger(trigger);
     }
   });
 }
 
 function getCopyTriggerCount() {
-  let count = 0;
-  const triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(function(trigger) {
-    if (trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER) {
-      count++;
-    }
+  return getProjectTriggerDetails().filter(function(trigger) {
+    return trigger.handler === COPY_TRIGGER_HANDLER;
+  }).length;
+}
+
+function getCopyTriggersForSession(sessionId) {
+  const state = getCopyState(sessionId);
+  if (!state || !state.triggerId) return [];
+  return getProjectTriggerDetails().filter(function(trigger) {
+    return trigger.id === state.triggerId;
   });
-  return count;
 }
 
 function getProjectTriggerDetails() {
   const triggers = ScriptApp.getProjectTriggers();
   return triggers.map(function(trigger) {
+    const id = safeTriggerValue(function() { return trigger.getUniqueId(); });
+    const handler = safeTriggerValue(function() { return trigger.getHandlerFunction(); });
+    const sessionId = handler === COPY_TRIGGER_HANDLER ? findSessionIdByTriggerUid(id) : '';
     return {
-      id: safeTriggerValue(function() { return trigger.getUniqueId(); }),
-      handler: safeTriggerValue(function() { return trigger.getHandlerFunction(); }),
+      id: id,
+      handler: handler,
       eventType: safeTriggerValue(function() { return String(trigger.getEventType()); }),
       source: safeTriggerValue(function() { return String(trigger.getTriggerSource()); }),
       sourceId: safeTriggerValue(function() { return trigger.getTriggerSourceId(); }),
-      isCopyTrigger: safeTriggerValue(function() {
-        return trigger.getHandlerFunction() === COPY_TRIGGER_HANDLER;
-      }) === true
+      sessionId: sessionId,
+      isCopyTrigger: handler === COPY_TRIGGER_HANDLER
     };
   });
 }
@@ -887,23 +1293,31 @@ function shouldPauseBatch(startTime) {
 function saveRunningBatch(state, current) {
   state.updatedAt = Date.now();
   state.lastCurrent = current || 'Tạm dừng lô, đang chuẩn bị chạy tiếp...';
-  state.nextTriggerAt = scheduleCopyTrigger();
+  const scheduled = scheduleCopyTrigger(state.sessionId);
+  state.triggerId = scheduled.triggerId;
+  state.nextTriggerAt = scheduled.nextTriggerAt;
   saveCopyState(state);
   setProgress({
+    sessionId: state.sessionId,
     done: state.files,
     total: 0,
     current: state.lastCurrent,
     name: state.name,
+    source: state.source,
+    destName: state.destName,
+    type: state.type,
     folders: state.folders || 0,
     bytesCopied: state.bytesCopied || 0,
     errors: state.errors,
     status: 'running',
     nextTriggerAt: state.nextTriggerAt
-  });
+  }, state.sessionId);
   return stateToRunningResult(state);
 }
 
 function processCopyState(state) {
+  if (state.type === 'file') return processSingleFileState(state);
+
   const startTime = Date.now();
 
   while (state.stack.length) {
@@ -938,13 +1352,19 @@ function processCopyState(state) {
 
         if (state.files % 5 === 0) {
           setProgress({
+            sessionId: state.sessionId,
             done: state.files,
             total: 0,
             current: f.getName(),
+            name: state.name,
+            source: state.source,
+            destName: state.destName,
+            type: state.type,
+            folders: state.folders || 0,
             bytesCopied: state.bytesCopied || 0,
             errors: state.errors,
             status: 'running'
-          });
+          }, state.sessionId);
         }
       }
 
@@ -978,13 +1398,19 @@ function processCopyState(state) {
             subsToken: null
           });
           setProgress({
+            sessionId: state.sessionId,
             done: state.files,
             total: 0,
             current: '📁 ' + sub.getName(),
+            name: state.name,
+            source: state.source,
+            destName: state.destName,
+            type: state.type,
+            folders: state.folders || 0,
             bytesCopied: state.bytesCopied || 0,
             errors: state.errors,
             status: 'running'
-          });
+          }, state.sessionId);
           break;
         } catch(e) {
           rememberCopyError(state, '❌ 📁 ' + sub.getName() + ': ' + e.message);
@@ -998,13 +1424,50 @@ function processCopyState(state) {
   }
 
   state.status = 'done';
-  clearCopyState();
   return {
+    sessionId: state.sessionId,
     name: state.name,
     files: state.files,
     folders: state.folders,
     bytesCopied: state.bytesCopied || 0,
     errors: state.errors,
+    status: 'done'
+  };
+}
+
+function processSingleFileState(state) {
+  if (isCopyCancelled(state)) return stateToCancelledResult(state);
+  const src = DriveApp.getFileById(state.sourceId);
+  const destFolder = state.destFolderId === 'root'
+    ? DriveApp.getRootFolder()
+    : DriveApp.getFolderById(state.destFolderId);
+  setProgress({
+    sessionId: state.sessionId,
+    done: 0,
+    total: 1,
+    current: src.getName(),
+    name: state.name,
+    source: state.source,
+    destName: state.destName,
+    type: state.type,
+    folders: 0,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors || [],
+    status: 'running'
+  }, state.sessionId);
+  const fileSize = src.getSize();
+  const copyStatus = copySingleFile(src, destFolder, state.overwriteMode);
+  state.files = 1;
+  state.folders = 0;
+  state.bytesCopied = copyStatus === 'skipped' ? 0 : fileSize;
+  state.status = 'done';
+  return {
+    sessionId: state.sessionId,
+    name: state.name,
+    files: state.files,
+    folders: 0,
+    bytesCopied: state.bytesCopied || 0,
+    errors: state.errors || [],
     status: 'done'
   };
 }

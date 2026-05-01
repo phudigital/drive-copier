@@ -25,7 +25,8 @@ assert_contains "$CODE_FILE" "function cancelCopy\\(" "backend exposes a cancel 
 assert_contains "$CODE_FILE" "function resumeCopyNow\\(" "backend exposes a manual resume API"
 assert_contains "$CODE_FILE" "triggerCount" "status payload reports scheduled background triggers"
 assert_contains "$CODE_FILE" "nextTriggerAt" "status payload reports expected next trigger time"
-assert_contains "$CODE_FILE" "parallelCopyEnabled: false" "dashboard states that this app currently runs one copy session"
+assert_contains "$CODE_FILE" "parallelCopyEnabled: true" "dashboard states that this app supports multiple copy sessions"
+assert_contains "$CODE_FILE" "maxParallelSessions: COPY_MAX_PARALLEL_SESSIONS" "dashboard reports the configured parallel session cap"
 assert_contains "$CODE_FILE" "const COPY_BATCH_MS = 180000;" "copy batches leave enough buffer below Apps Script's 6-minute runtime limit"
 
 assert_contains "$HTML_FILE" "backgroundStatus" "UI includes a background status surface"

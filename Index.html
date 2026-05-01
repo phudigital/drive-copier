@@ -79,7 +79,9 @@
         .mode-opt.sel-rename{border-color:var(--accent2);color:var(--accent2);background:var(--accent2-glow)}
         .mode-opt.sel-overwrite{border-color:var(--warn);color:var(--warn);background:rgba(251,191,36,0.08)}
         .mode-opt.sel-skip{border-color:var(--muted);color:var(--text2);background:rgba(156,163,175,0.06)}
-        .mode-opt.sel-rename .mode-dot,.mode-opt.sel-overwrite .mode-dot,.mode-opt.sel-skip .mode-dot{background:currentColor}
+        .mode-opt.sel-wait{border-color:var(--warn);color:var(--warn);background:rgba(251,191,36,0.08)}
+        .mode-opt.sel-parallel{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+        .mode-opt.sel-rename .mode-dot,.mode-opt.sel-overwrite .mode-dot,.mode-opt.sel-skip .mode-dot,.mode-opt.sel-wait .mode-dot,.mode-opt.sel-parallel .mode-dot{background:currentColor}
         .mode-opt:active{transform:scale(0.97)}
 
         /* Folder nav */
@@ -171,7 +173,11 @@
         .trigger-item.copy{border-color:rgba(52,211,153,0.45);background:var(--accent-glow)}
         .trigger-badge{display:inline-flex;align-items:center;border:1px solid var(--border-light);border-radius:999px;padding:2px 7px;font-size:10px;color:var(--muted);margin-left:4px}
         .trigger-badge.ok{border-color:rgba(52,211,153,0.45);color:var(--accent)}
+        .trigger-badge.warn{border-color:rgba(251,191,36,0.45);color:var(--warn)}
+        .trigger-badge.bad{border-color:rgba(248,113,113,0.45);color:var(--danger)}
         .trigger-meta{display:grid;grid-template-columns:1fr;gap:4px;margin-top:6px}
+        .session-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+        .session-errors{margin-top:8px;padding:8px;border-radius:var(--radius-sm);background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);color:var(--danger);font-size:11px;line-height:1.45}
 
         /* Spinner */
         .spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(56,189,248,0.3);border-top-color:var(--accent2);border-radius:50%;animation:spin .7s linear infinite}
@@ -356,6 +362,20 @@
             </div>
 
             <div class="card">
+                <div class="card-title">☁ Khi có phiên copy khác</div>
+                <div class="mode-group sessionStartMode">
+                    <label class="mode-opt sel-wait" onclick="selectSessionMode('wait',this)">
+                        <input type="radio" name="sessionStartMode" value="wait" checked>
+                        <span class="mode-dot"></span> Chờ
+                    </label>
+                    <label class="mode-opt" onclick="selectSessionMode('parallel',this)">
+                        <input type="radio" name="sessionStartMode" value="parallel">
+                        <span class="mode-dot"></span> Tạo phiên song song
+                    </label>
+                </div>
+            </div>
+
+            <div class="card">
                 <div class="card-title">📁 Thư mục đích</div>
                 <div class="folder-nav-row">
                     <div class="folder-nav" id="folderNav">
@@ -429,6 +449,10 @@
                 </div>
             </div>
             <div class="card">
+                <div class="card-title">☁ Phiên copy</div>
+                <div id="copySessions" class="trigger-grid"></div>
+            </div>
+            <div class="card">
                 <div class="card-title">📡 Trigger trong Apps Script</div>
                 <div id="triggerList" class="trigger-grid"></div>
             </div>
@@ -494,6 +518,7 @@
     let mngBreadcrumb = [{id:'root',name:'My Drive'}];
     let pollTimer = null;
     let copyRunning = false;
+    let activeSessionId = '';
     let lastProgressTs = 0;
     let mngSelectedFolder = null;
     let dialogCallback = null;
@@ -534,11 +559,27 @@
 
     /* ============ MODE ============ */
     function selectMode(mode, el) {
-        document.querySelectorAll('.mode-opt').forEach(o => o.className = 'mode-opt');
+        document.querySelectorAll('input[name="overwrite"]').forEach(input => {
+            input.closest('.mode-opt').className = 'mode-opt';
+        });
         el.classList.add('sel-' + mode);
         el.querySelector('input').checked = true;
     }
     function getMode() { return document.querySelector('input[name="overwrite"]:checked').value; }
+    function selectSessionMode(mode, el) {
+        document.querySelectorAll('input[name="sessionStartMode"]').forEach(input => {
+            input.closest('.mode-opt').className = 'mode-opt';
+        });
+        el.classList.add('sel-' + mode);
+        el.querySelector('input').checked = true;
+    }
+    function getSessionStartMode() {
+        const input = document.querySelector('input[name="sessionStartMode"]:checked');
+        return input ? input.value : 'wait';
+    }
+    function makeClientSessionId() {
+        return 'ui_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+    }
 
     /* ============ FOLDER NAVIGATION (Copy tab) ============ */
     function loadFolders(parentId) {
@@ -627,10 +668,12 @@
         const url = document.getElementById('sourceUrl').value.trim();
         const dest = document.getElementById('destFolderId').value;
         const mode = getMode();
+        const startMode = getSessionStartMode();
         if (!url) { showFinalStatus('Vui lòng nhập link hoặc ID nguồn.','error'); return; }
         if (copyRunning) return;
 
         copyRunning = true;
+        activeSessionId = makeClientSessionId();
         lastProgressTs = 0;
         const btn = document.getElementById('copyBtn');
         btn.disabled = true;
@@ -639,23 +682,32 @@
 	        document.getElementById('errorLog').classList.remove('show');
 	        document.getElementById('progressBar').classList.remove('done');
 
-	        showProgress(0, 1, 'Đang khởi động...', '', [], 0);
-	        startPolling();
-	        runCopyBatch('copyItem', [url, dest, mode]);
-	        refreshBackgroundStatus();
-	    }
+		        showProgress(0, 1, 'Đang khởi động...', '', [], 0);
+		        startPolling();
+		        runCopyBatch('copyItem', [url, dest, mode, startMode, activeSessionId]);
+		        refreshBackgroundStatus();
+		    }
 
     function runCopyBatch(method, args) {
         const runner = google.script.run
             .withSuccessHandler(res => {
-	                if (res && res.status === 'running') {
-	                    const copiedText = fmtBytes(res.bytesCopied || 0) + ' đã copy';
-	                    showProgress(res.files, 0, 'Đang copy tiếp theo lô...', res.files + ' file · ' + copiedText, res.errors || [], res.bytesCopied || 0);
-	                    showFinalStatus('⏳ Đã kích hoạt copy nền. Bạn có thể tắt tab hoặc tắt máy; Apps Script sẽ tự chạy tiếp theo từng lô.', 'success');
-	                    refreshBackgroundStatus();
-	                    return;
-	                }
-	                finishCopyUi(res);
+                        if (res && res.sessionId) activeSessionId = res.sessionId;
+		                if (res && res.status === 'queued') {
+		                    showProgress(res.files || 0, 0, 'Đang chờ slot chạy nền...', (res.files || 0) + ' file · ' + fmtBytes(res.bytesCopied || 0) + ' đã copy', res.errors || [], res.bytesCopied || 0);
+		                    showFinalStatus('⏳ Đã đưa vào hàng chờ. Khi còn dưới 3 phiên chạy song song, Apps Script sẽ tự chạy phiên này.', 'success');
+		                    refreshBackgroundStatus();
+		                    loadTriggerDashboard();
+		                    return;
+		                }
+		                if (res && res.status === 'running') {
+		                    const copiedText = fmtBytes(res.bytesCopied || 0) + ' đã copy';
+		                    showProgress(res.files, 0, 'Đang copy tiếp theo lô...', res.files + ' file · ' + copiedText, res.errors || [], res.bytesCopied || 0);
+		                    showFinalStatus('⏳ Đã kích hoạt copy nền. Bạn có thể tắt tab hoặc tắt máy; Apps Script sẽ tự chạy tiếp theo từng lô.', 'success');
+		                    refreshBackgroundStatus();
+		                    loadTriggerDashboard();
+		                    return;
+		                }
+		                finishCopyUi(res);
             })
             .withFailureHandler(e => {
                 stopPolling();
@@ -667,14 +719,15 @@
                 showFinalStatus('❌ Lỗi: ' + e.message, 'error');
             });
         if (method === 'continueCopy') {
-            runner.continueCopy();
+            runner.continueCopy(args && args[0] ? args[0] : activeSessionId);
         } else {
-            runner.copyItem(args[0], args[1], args[2]);
+            runner.copyItem(args[0], args[1], args[2], args[3], args[4]);
         }
     }
 
-	    function finishCopyUi(res) {
-	        stopPolling();
+		    function finishCopyUi(res) {
+		        if (res && res.sessionId) activeSessionId = res.sessionId;
+		        stopPolling();
 	        copyRunning = false;
 	        const btn = document.getElementById('copyBtn');
 	        btn.disabled = false;
@@ -706,12 +759,12 @@
 	        el.innerHTML = '<span class="spin"></span> Đang kiểm tra phiên nền...';
 	        google.script.run
 	            .withSuccessHandler(renderBackgroundStatus)
-	            .withFailureHandler(e => {
-	                el.innerHTML = '<span class="bad">Không thể đọc trạng thái:</span> ' + escHtml(e.message);
-	                setBackgroundButtons(false, false);
-	            })
-	            .getCopyStatus();
-	    }
+		            .withFailureHandler(e => {
+		                el.innerHTML = '<span class="bad">Không thể đọc trạng thái:</span> ' + escHtml(e.message);
+		                setBackgroundButtons(false, false);
+		            })
+		            .getCopyStatus(activeSessionId || '');
+		    }
 
 	    function renderBackgroundStatus(status) {
 	        const el = document.getElementById('backgroundStatus');
@@ -721,35 +774,40 @@
 	            return;
 	        }
 
-	        const labelMap = {
-	            running: '<span class="ok">Đang chạy</span>',
-	            scheduled: '<span class="ok">Đã hẹn chạy</span>',
-	            done: '<span class="ok">Hoàn thành</span>',
-	            cancelled: '<span class="warn">Đã hủy</span>',
-	            error: '<span class="bad">Có lỗi</span>'
-	        };
+		        const labelMap = {
+		            running: '<span class="ok">Đang chạy</span>',
+		            scheduled: '<span class="ok">Đã hẹn chạy</span>',
+		            queued: '<span class="warn">Đang chờ</span>',
+		            done: '<span class="ok">Hoàn thành</span>',
+		            cancelled: '<span class="warn">Đã hủy</span>',
+		            error: '<span class="bad">Có lỗi</span>'
+		        };
 	        const triggerText = status.triggerCount
 	            ? status.triggerCount + ' trigger · ' + (status.nextTriggerAt ? 'dự kiến ' + fmtTime(status.nextTriggerAt) : 'đã hẹn')
 	            : 'Chưa có trigger chờ';
-	        const current = status.current ? '<div>Việc hiện tại: <strong>' + escHtml(status.current) + '</strong></div>' : '';
-	        const name = status.name ? '<div>Nguồn: <strong>' + escHtml(status.name) + '</strong></div>' : '';
-	        const updated = status.updatedAt ? '<div>Cập nhật: <strong>' + fmtTime(status.updatedAt) + '</strong></div>' : '';
-	        const errors = status.errors && status.errors.length
-	            ? '<div class="bad">Lỗi gần nhất: ' + status.errors.length + '</div>'
-	            : '';
+		        const current = status.current ? '<div>Việc hiện tại: <strong>' + escHtml(status.current) + '</strong></div>' : '';
+		        const name = status.name ? '<div>Nguồn: <strong>' + escHtml(status.name) + '</strong></div>' : '';
+		        const updated = status.updatedAt ? '<div>Cập nhật: <strong>' + fmtTime(status.updatedAt) + '</strong></div>' : '';
+		        const sessionStats = status.sessions
+		            ? '<div>Phiên: <strong>' + (status.activeCount || 0) + '/' + (status.maxParallelSessions || 3) + ' đang chạy · ' + (status.queuedCount || 0) + ' chờ</strong></div>'
+		            : '';
+		        const errors = status.errors && status.errors.length
+		            ? '<div class="bad">Lỗi gần nhất: ' + status.errors.length + '</div>'
+		            : '';
 
 	        el.innerHTML =
 	            '<div>Trạng thái: <strong>' + (labelMap[status.status] || escHtml(status.status)) + '</strong></div>' +
 	            '<div class="bg-meta">' +
-	                name +
-	                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
+		                name +
+		                sessionStats +
+		                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
 	                '<div>Trigger nền: <strong>' + escHtml(triggerText) + '</strong></div>' +
 	                current +
 	                updated +
 	                errors +
 	            '</div>';
-	        setBackgroundButtons(status.hasState && status.status === 'running', status.running || status.hasState);
-	    }
+		        setBackgroundButtons(status.hasState && (status.status === 'running' || status.status === 'queued'), status.running || status.hasState || status.status === 'queued');
+		    }
 
 	    function setBackgroundButtons(canResume, canCancel) {
 	        document.getElementById('bgResumeBtn').disabled = !canResume;
@@ -764,11 +822,11 @@
 	                renderBackgroundStatus(status);
 	                if (status && status.running) startPolling();
 	            })
-	            .withFailureHandler(e => {
-	                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
-	                refreshBackgroundStatus();
-	            })
-	            .resumeCopyNow();
+		            .withFailureHandler(e => {
+		                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
+		                refreshBackgroundStatus();
+		            })
+		            .resumeCopyNow(activeSessionId || '');
 	    }
 
 	    function cancelBackgroundCopy() {
@@ -784,80 +842,137 @@
 	                renderBackgroundStatus(status);
 	                showFinalStatus('Đã hủy phiên copy nền. Nếu một batch đang chạy, nó sẽ dừng ở lần kiểm tra kế tiếp.', 'error');
 	            })
-	            .withFailureHandler(e => {
-	                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
-	                refreshBackgroundStatus();
-	            })
-	            .cancelCopy();
-	    }
+		            .withFailureHandler(e => {
+		                document.getElementById('backgroundStatus').innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
+		                refreshBackgroundStatus();
+		            })
+		            .cancelCopy(activeSessionId || '');
+		    }
 
-	    function loadTriggerDashboard() {
-	        const stateEl = document.getElementById('triggerCopyState');
-	        const listEl = document.getElementById('triggerList');
-	        const limitsEl = document.getElementById('triggerLimits');
-	        if (!stateEl || !listEl || !limitsEl) return;
-	        stateEl.innerHTML = '<span class="spin"></span> Đang kiểm tra trigger...';
-	        listEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
-	        limitsEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
+		    function loadTriggerDashboard() {
+		        const stateEl = document.getElementById('triggerCopyState');
+		        const sessionsEl = document.getElementById('copySessions');
+		        const listEl = document.getElementById('triggerList');
+		        const limitsEl = document.getElementById('triggerLimits');
+		        if (!stateEl || !sessionsEl || !listEl || !limitsEl) return;
+		        stateEl.innerHTML = '<span class="spin"></span> Đang kiểm tra trigger...';
+		        sessionsEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải phiên...</div>';
+		        listEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
+		        limitsEl.innerHTML = '<div class="trigger-item"><span class="spin"></span> Đang tải...</div>';
 	        google.script.run
 	            .withSuccessHandler(renderTriggerDashboard)
-	            .withFailureHandler(e => {
-	                stateEl.innerHTML = '<span class="bad">Không thể đọc trigger:</span> ' + escHtml(e.message);
-	                listEl.innerHTML = '';
-	                limitsEl.innerHTML = '';
-	            })
+		            .withFailureHandler(e => {
+		                stateEl.innerHTML = '<span class="bad">Không thể đọc trigger:</span> ' + escHtml(e.message);
+		                sessionsEl.innerHTML = '';
+		                listEl.innerHTML = '';
+		                limitsEl.innerHTML = '';
+		            })
 	            .getTriggerDashboard();
 	    }
 
-	    function renderTriggerDashboard(data) {
-	        renderTriggerCopyState(data.copyStatus || {}, data.appMode || {});
-	        renderTriggerList(data.triggers || [], data.copyStatus || {});
-	        renderTriggerLimits(data.limits || {}, data.appMode || {});
-	    }
+		    function renderTriggerDashboard(data) {
+		        renderTriggerCopyState(data.copyStatus || {}, data.appMode || {});
+		        renderCopySessions(data.sessions || []);
+		        renderTriggerList(data.triggers || [], data.sessions || []);
+		        renderTriggerLimits(data.limits || {}, data.appMode || {});
+		    }
 
-	    function renderTriggerCopyState(status, appMode) {
-	        const el = document.getElementById('triggerCopyState');
-	        const labelMap = {
-	            running: '<span class="ok">Đang chạy</span>',
-	            scheduled: '<span class="ok">Đã hẹn chạy</span>',
-	            done: '<span class="ok">Hoàn thành</span>',
-	            cancelled: '<span class="warn">Đã hủy</span>',
-	            error: '<span class="bad">Có lỗi</span>',
-	            idle: '<span>Không chạy</span>'
-	        };
-	        const modeText = appMode.parallelCopyEnabled
-	            ? 'Cho phép nhiều phiên copy'
-	            : 'Đang khóa 1 phiên copy';
+		    function renderTriggerCopyState(status, appMode) {
+		        const el = document.getElementById('triggerCopyState');
+		        const labelMap = {
+		            running: '<span class="ok">Đang chạy</span>',
+		            scheduled: '<span class="ok">Đã hẹn chạy</span>',
+		            queued: '<span class="warn">Đang chờ</span>',
+		            done: '<span class="ok">Hoàn thành</span>',
+		            cancelled: '<span class="warn">Đã hủy</span>',
+		            error: '<span class="bad">Có lỗi</span>',
+		            idle: '<span>Không chạy</span>'
+		        };
+		        const modeText = appMode.parallelCopyEnabled
+		            ? 'Cho phép nhiều phiên copy, tối đa ' + (appMode.maxParallelSessions || 3)
+		            : 'Đang khóa 1 phiên copy';
 	        el.innerHTML =
 	            '<div>Trạng thái: <strong>' + (labelMap[status.status] || escHtml(status.status || 'idle')) + '</strong></div>' +
 	            '<div class="bg-meta">' +
-	                '<div>Phiên copy: <strong>' + escHtml(modeText) + '</strong></div>' +
-	                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
+		                '<div>Phiên copy: <strong>' + escHtml(modeText) + '</strong></div>' +
+		                '<div>Đang chạy/chờ: <strong>' + (status.activeCount || 0) + '/' + (status.maxParallelSessions || appMode.maxParallelSessions || 3) + ' chạy · ' + (status.queuedCount || 0) + ' chờ</strong></div>' +
+		                '<div>Tiến độ: <strong>' + (status.files || 0) + ' file · ' + fmtBytes(status.bytesCopied || 0) + ' đã copy</strong></div>' +
 	                '<div>Trigger copy: <strong>' + (status.triggerCount || 0) + '</strong></div>' +
 	                (status.nextTriggerAt ? '<div>Dự kiến chạy tiếp: <strong>' + fmtTime(status.nextTriggerAt) + '</strong></div>' : '') +
 	                (status.current ? '<div>Việc hiện tại: <strong>' + escHtml(status.current) + '</strong></div>' : '') +
 	                (!appMode.parallelCopyEnabled && appMode.reason ? '<div style="color:var(--warn)">' + escHtml(appMode.reason) + '</div>' : '') +
-	            '</div>';
-	    }
+		            '</div>';
+		    }
 
-	    function renderTriggerList(triggers, status) {
-	        const el = document.getElementById('triggerList');
-	        if (!triggers.length) {
-	            el.innerHTML = '<div class="trigger-item">Không có trigger nào trong project.</div>';
+		    function renderCopySessions(sessions) {
+		        const el = document.getElementById('copySessions');
+		        if (!sessions.length) {
+		            el.innerHTML = '<div class="trigger-item">Chưa có phiên copy nào.</div>';
+		            return;
+		        }
+		        el.innerHTML = sessions.slice().reverse().map(session => {
+		            const badge = session.status === 'running'
+		                ? '<span class="trigger-badge ok">đang chạy</span>'
+		                : (session.status === 'queued'
+		                    ? '<span class="trigger-badge warn">đang chờ</span>'
+		                    : (session.status === 'error'
+		                        ? '<span class="trigger-badge bad">lỗi</span>'
+		                        : '<span class="trigger-badge">' + escHtml(session.status || 'idle') + '</span>'));
+		            const triggerText = session.triggerCount
+		                ? session.triggerCount + ' trigger' + (session.nextTriggerAt ? ' · ' + fmtTime(session.nextTriggerAt) : '')
+		                : 'không có trigger chờ';
+		            const queueReason = session.queueReason
+		                ? '<div>Lý do chờ: <strong>' + escHtml(session.queueReason) + '</strong></div>'
+		                : '';
+		            const current = session.current
+		                ? '<div>Việc hiện tại: <strong>' + escHtml(session.current) + '</strong></div>'
+		                : '';
+		            const errors = session.errors && session.errors.length
+		                ? '<div class="session-errors"><strong>Lỗi gần nhất:</strong>' + session.errors.map(e => '<div>' + escHtml(e) + '</div>').join('') + '</div>'
+		                : '';
+		            const canResume = session.hasState && (session.status === 'running' || session.status === 'queued');
+		            const canCancel = session.hasState || session.status === 'queued';
+		            const sid = session.sessionId || '';
+		            return '<div class="trigger-item copy">' +
+		                '<div><strong>' + escHtml(session.name || 'Phiên copy') + '</strong>' + badge + '</div>' +
+		                '<div class="trigger-meta">' +
+		                    '<div>ID: <strong>' + escHtml(sid) + '</strong></div>' +
+		                    '<div>Đích: <strong>' + escHtml(session.destName || '—') + '</strong></div>' +
+		                    '<div>Tiến độ: <strong>' + (session.files || 0) + ' file · ' + (session.folders || 0) + ' folder · ' + fmtBytes(session.bytesCopied || 0) + '</strong></div>' +
+		                    '<div>Trigger: <strong>' + escHtml(triggerText) + '</strong></div>' +
+		                    queueReason +
+		                    current +
+		                    (session.updatedAt ? '<div>Cập nhật: <strong>' + fmtTime(session.updatedAt) + '</strong></div>' : '') +
+		                '</div>' +
+		                errors +
+		                '<div class="session-actions">' +
+		                    '<button class="btn-sm green" onclick="resumeSessionCopy(\'' + sid + '\')" ' + (canResume ? '' : 'disabled') + '>Chạy ngay</button>' +
+		                    '<button class="btn-sm ghost" onclick="cancelSessionCopy(\'' + sid + '\')" style="border-color:var(--danger);color:var(--danger)" ' + (canCancel ? '' : 'disabled') + '>Hủy</button>' +
+		                '</div>' +
+		            '</div>';
+		        }).join('');
+		    }
+
+		    function renderTriggerList(triggers, sessions) {
+		        const el = document.getElementById('triggerList');
+		        if (!triggers.length) {
+		            el.innerHTML = '<div class="trigger-item">Không có trigger nào trong project.</div>';
 	            return;
-	        }
-	        el.innerHTML = triggers.map(trigger => {
-	            const isCopy = trigger.isCopyTrigger || trigger.handler === 'continueCopyByTrigger';
-	            const nextRun = isCopy && status.nextTriggerAt
-	                ? '<div>Ước tính chạy tiếp: <strong>' + fmtTime(status.nextTriggerAt) + '</strong></div>'
-	                : '';
-	            return '<div class="trigger-item ' + (isCopy ? 'copy' : '') + '">' +
-	                '<div><strong>' + escHtml(trigger.handler || 'Không rõ handler') + '</strong>' +
+		        }
+		        el.innerHTML = triggers.map(trigger => {
+		            const isCopy = trigger.isCopyTrigger || trigger.handler === 'continueCopyByTrigger';
+		            const session = isCopy ? (sessions || []).find(s => s.sessionId === trigger.sessionId) : null;
+		            const nextRun = isCopy && session && session.nextTriggerAt
+		                ? '<div>Ước tính chạy tiếp: <strong>' + fmtTime(session.nextTriggerAt) + '</strong></div>'
+		                : '';
+		            return '<div class="trigger-item ' + (isCopy ? 'copy' : '') + '">' +
+		                '<div><strong>' + escHtml(trigger.handler || 'Không rõ handler') + '</strong>' +
 	                    (isCopy ? '<span class="trigger-badge ok">copy nền</span>' : '<span class="trigger-badge">khác</span>') +
 	                '</div>' +
 	                '<div class="trigger-meta">' +
-	                    '<div>ID: <strong>' + escHtml(trigger.id || '—') + '</strong></div>' +
-	                    '<div>Loại: <strong>' + escHtml(trigger.eventType || '—') + '</strong></div>' +
+		                    '<div>ID: <strong>' + escHtml(trigger.id || '—') + '</strong></div>' +
+		                    (trigger.sessionId ? '<div>Phiên: <strong>' + escHtml(trigger.sessionId) + '</strong></div>' : '') +
+		                    '<div>Loại: <strong>' + escHtml(trigger.eventType || '—') + '</strong></div>' +
 	                    '<div>Nguồn: <strong>' + escHtml(trigger.source || '—') + '</strong></div>' +
 	                    nextRun +
 	                '</div>' +
@@ -872,30 +987,31 @@
 	                '<div>Apps Script: <strong>' + (appMode.appsScriptSupportsParallelExecutions ? 'có hỗ trợ execution song song' : 'không rõ') + '</strong></div>' +
 	                '<div class="trigger-meta">' +
 	                    '<div>Runtime mỗi lần chạy: <strong>' + (limits.scriptRuntimeMin || 6) + ' phút</strong></div>' +
-	                    '<div>Đồng thời mỗi user: <strong>' + (limits.simultaneousExecutionsPerUser || 30) + '</strong></div>' +
-	                    '<div>Đồng thời mỗi script: <strong>' + (limits.simultaneousExecutionsPerScript || 1000) + '</strong></div>' +
-	                    '<div>Trigger mỗi user/script: <strong>' + (limits.triggersPerUserPerScript || 20) + '</strong></div>' +
+		                    '<div>Đồng thời mỗi user: <strong>' + (limits.simultaneousExecutionsPerUser || 30) + '</strong></div>' +
+		                    '<div>Đồng thời mỗi script: <strong>' + (limits.simultaneousExecutionsPerScript || 1000) + '</strong></div>' +
+		                    '<div>Giới hạn app này: <strong>' + (appMode.maxParallelSessions || 3) + ' phiên copy song song</strong></div>' +
+		                    '<div>Trigger mỗi user/script: <strong>' + (limits.triggersPerUserPerScript || 20) + '</strong></div>' +
 	                    '<div>Runtime trigger/ngày: <strong>' + (limits.triggerRuntimeConsumerMinPerDay || 90) + ' phút Gmail · ' + (limits.triggerRuntimeWorkspaceHrPerDay || 6) + ' giờ Workspace</strong></div>' +
 	                '</div>' +
 	            '</div>';
 	    }
 
-	    function resumeTriggerCopy() {
-	        const el = document.getElementById('triggerCopyState');
-	        el.innerHTML = '<span class="spin"></span> Đang chạy tiếp phiên nền...';
-	        google.script.run
+		    function resumeTriggerCopy() {
+		        const el = document.getElementById('triggerCopyState');
+		        el.innerHTML = '<span class="spin"></span> Đang chạy tiếp phiên nền...';
+		        google.script.run
 	            .withSuccessHandler(() => {
 	                refreshBackgroundStatus();
 	                loadTriggerDashboard();
 	            })
-	            .withFailureHandler(e => {
-	                el.innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
-	            })
-	            .resumeCopyNow();
-	    }
+		            .withFailureHandler(e => {
+		                el.innerHTML = '<span class="bad">Không thể chạy tiếp:</span> ' + escHtml(e.message);
+		            })
+		            .resumeCopyNow(activeSessionId || '');
+		    }
 
-	    function cancelTriggerCopy() {
-	        const el = document.getElementById('triggerCopyState');
+		    function cancelTriggerCopy() {
+		        const el = document.getElementById('triggerCopyState');
 	        el.innerHTML = '<span class="spin"></span> Đang hủy phiên nền...';
 	        google.script.run
 	            .withSuccessHandler(() => {
@@ -907,27 +1023,69 @@
 	                refreshBackgroundStatus();
 	                loadTriggerDashboard();
 	            })
-	            .withFailureHandler(e => {
-	                el.innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
-	            })
-	            .cancelCopy();
-	    }
+		            .withFailureHandler(e => {
+		                el.innerHTML = '<span class="bad">Không thể hủy:</span> ' + escHtml(e.message);
+		            })
+		            .cancelCopy(activeSessionId || '');
+		    }
+
+		    function resumeSessionCopy(sessionId) {
+		        google.script.run
+		            .withSuccessHandler(status => {
+		                if (sessionId) activeSessionId = sessionId;
+		                if (status && status.running) startPolling();
+		                refreshBackgroundStatus();
+		                loadTriggerDashboard();
+		            })
+		            .withFailureHandler(e => {
+		                showFinalStatus('❌ Không thể chạy phiên: ' + escHtml(e.message), 'error');
+		                loadTriggerDashboard();
+		            })
+		            .resumeCopyNow(sessionId);
+		    }
+
+		    function cancelSessionCopy(sessionId) {
+		        google.script.run
+		            .withSuccessHandler(() => {
+		                if (activeSessionId === sessionId) {
+		                    stopPolling();
+		                    copyRunning = false;
+		                    const btn = document.getElementById('copyBtn');
+		                    btn.disabled = false;
+		                    btn.innerHTML = '⬇ Bắt đầu Copy';
+		                }
+		                refreshBackgroundStatus();
+		                loadTriggerDashboard();
+		            })
+		            .withFailureHandler(e => {
+		                showFinalStatus('❌ Không thể hủy phiên: ' + escHtml(e.message), 'error');
+		                loadTriggerDashboard();
+		            })
+		            .cancelCopy(sessionId);
+		    }
 
 	    /* ============ PROGRESS POLLING (STABLE) ============ */
 	    function startPolling() {
 	        if (pollTimer) return;
-	        pollTimer = setInterval(() => {
-            google.script.run.withSuccessHandler(p => {
-                if (!p) return;
-                // Chỉ cập nhật nếu timestamp mới hơn → tránh hiển thị data cũ
-                if (p._ts && p._ts <= lastProgressTs) return;
-                lastProgressTs = p._ts || 0;
-                const copiedText = fmtBytes(p.bytesCopied || 0) + ' đã copy';
-                const counts = p.total > 0 ? p.done + ' / ' + p.total + ' file · ' + copiedText : p.done + ' file · ' + copiedText;
-                showProgress(p.done, p.total, p.current, counts, p.errors || [], p.bytesCopied || 0);
-	                if (p.status === 'done') {
-	                    finishCopyUi({
-                        name: p.name || 'Hoàn thành',
+		        pollTimer = setInterval(() => {
+	            google.script.run.withSuccessHandler(p => {
+	                if (!p) return;
+	                if (p.sessionId) activeSessionId = p.sessionId;
+	                // Chỉ cập nhật nếu timestamp mới hơn → tránh hiển thị data cũ
+	                if (p._ts && p._ts <= lastProgressTs) return;
+	                lastProgressTs = p._ts || 0;
+	                const copiedText = fmtBytes(p.bytesCopied || 0) + ' đã copy';
+	                const counts = p.total > 0 ? p.done + ' / ' + p.total + ' file · ' + copiedText : p.done + ' file · ' + copiedText;
+	                showProgress(p.done, p.total, p.current, counts, p.errors || [], p.bytesCopied || 0);
+		                if (p.status === 'queued') {
+		                    showFinalStatus('⏳ Phiên này đang chờ. Tối đa 3 phiên được chạy song song; khi có slot trống hệ thống sẽ tự chạy tiếp.', 'success');
+		                    refreshBackgroundStatus();
+		                    return;
+		                }
+		                if (p.status === 'done') {
+		                    finishCopyUi({
+		                    sessionId: p.sessionId || activeSessionId,
+	                        name: p.name || 'Hoàn thành',
                         files: p.done || 0,
                         folders: p.folders || 0,
                         bytesCopied: p.bytesCopied || 0,
@@ -950,9 +1108,9 @@
 	                    stopPolling();
 	                    refreshBackgroundStatus();
 	                }
-	            }).getProgress();
-	        }, 1500);
-	    }
+	            }).getProgress(activeSessionId);
+		        }, 1500);
+		    }
     function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
     function showProgress(done, total, current, counts, errors, bytesCopied) {
